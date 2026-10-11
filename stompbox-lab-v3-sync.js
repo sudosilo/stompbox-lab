@@ -1,4 +1,4 @@
-/* stompbox-lab-v2-sync.js
+/* stompbox-lab-v3-sync.js
    Board sync client. Shared by every app that syncs a board between phones.
    The app supplies exportState, loadState and applyChange. This file owns the
    device id, the room code, the socket and the message format.
@@ -19,7 +19,10 @@
    A "request" asks this phone to answer with a snapshot of its board.
 
    ORANGE PHONE: v2 adds on() and send() so other modules share this one socket.
-   The clock uses "ping" and "pong". The loop uses "transport" and "loop". */
+   The clock uses "ping" and "pong". The loop uses "transport" and "loop".
+   ORANGE PHONE: v3 adds ready() and onOpen() for login. While ready() is false the socket
+   stays closed and the status reads "sign in". onOpen() runs first on every new socket,
+   which is where the app sends its login token. The heartbeat uses "beat". */
 (function(){
 "use strict";
 
@@ -67,11 +70,12 @@ window.createBoardSync=function(o){
     if(ws){const old=ws;ws=null;old.close()}
     if(!url){setStatus("off");return}
     if(!room){setStatus("no room");return}
+    if(o.ready&&!o.ready()){setStatus("sign in");return}
     setStatus("connecting");
     const q="app="+encodeURIComponent(app)+"&room="+encodeURIComponent(room)+"&device="+encodeURIComponent(device);
     const sock=new WebSocket(url+(url.indexOf("?")<0?"?":"&")+q);
     ws=sock;
-    sock.onopen=function(){if(ws!==sock)return;retry=0;setStatus("live");send(envelope("hello"))};
+    sock.onopen=function(){if(ws!==sock)return;retry=0;if(o.onOpen)o.onOpen();setStatus("live");send(envelope("hello"))};
     sock.onmessage=function(e){if(ws===sock)receive(e.data)};
     sock.onerror=function(){sock.close()};
     sock.onclose=function(){

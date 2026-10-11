@@ -1,8 +1,9 @@
-/* stompbox-lab-v2-server.js
+/* stompbox-lab-v3-server.js
    Stompbox Lab sync and loop server. Runs on Railway from the backend folder.
 
    ORANGE PHONE: stage one, WebSocket rooms, board relay, server clock pings.
    ORANGE PHONE: stage two, loop state in Redis, hand written grooves, bar line changes.
+   ORANGE PHONE: stage three, Supabase login check, player heartbeats, heartbeat gate on the loop.
 
    One WebSocket per phone. The address carries app, room and device in the query string.
    Every message is one JSON object with a type field.
@@ -14,7 +15,14 @@
      server sends  {type:"pong", t0, t1}          t1 is the server clock in milliseconds
    Loop messages:
      phone sends   {type:"transport", action:"start"|"stop"|"tempo"|"groove", tempo, groove}
-     server sends  {type:"loop", state, grooves, now}
+     server sends  {type:"loop", state, grooves, now, auth, players}
+   Login messages, only used while SUPABASE_URL is set:
+     phone sends   {type:"auth", token}           first message on every socket, and again after a token refresh
+     server sends  {type:"auth", ok, email, reason}
+   Heartbeat:
+     phone sends   {type:"beat"}                  every 10 seconds while that phone is playing
+   The loop only runs while one live heartbeat exists. A heartbeat lives for 20 seconds.
+   When the last one runs out the loop stops and state.idle turns true. The next heartbeat starts it again.
 
    Loop state:
      playing    true while the loop runs
@@ -24,11 +32,15 @@
      groove     name of the groove in use
      slots      one pattern per instrument slot, in mini notation, one bar per cycle
      pending    null, or {atBar, tempo, groove, slots} that every phone switches to on that bar line
+     idle       true while the loop is stopped because no player is active
 
    Environment variables:
      PORT             set by Railway
      REDIS_URL        optional, without it state lives in memory only
      REDIS_PREFIX     optional, key prefix, default "stompbox:"
+     SUPABASE_URL       optional, with SUPABASE_ANON_KEY it turns login on
+     SUPABASE_ANON_KEY  optional, the public Supabase key
+     ALLOWED_EMAILS     optional, comma separated list of emails allowed to play, blank allows every signed in player
      ALLOWED_ORIGINS  optional, comma separated list of page origins allowed to connect */
 "use strict";
 
@@ -44,6 +56,31 @@ const MAX_MESSAGES_PER_SECOND = 80;
 const MAX_BOARD_PATHS = 500;
 const TEMPO_MIN = 50, TEMPO_MAX = 200;
 const SLOT_IDS = ["drums", "bass", "lead", "pad"];
+const BEAT_SECONDS = 20;
+const START_GRACE_MS = 15000;
+const AUTH_WAIT_MS = 15000;
+
+/* ---------- login, optional ---------- */
+const SUPA_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+const SUPA_KEY = process.env.SUPABASE_ANON_KEY || "";
+const AUTH_ON = !!(SUPA_URL && SUPA_KEY);
+const ALLOWED = (process.env.ALLOWED_EMAILS || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean);
+/* ORANGE PHONE: Supabase itself checks the token, so no secret is stored on this server for login. */
+async function verify(token) {
+  if (typeof token !== "string" || token.length < 20 || token.length > 4000) return { reason: "sign in again" };
+  let user;
+  try {
+    const r = await fetch(SUPA_URL + "/auth/v1/user", { headers: { apikey: SUPA_KEY, authorization: "Bearer " + token }, signal: AbortSignal.timeout(6000) });
+    if (!r.ok) return { reason: "sign in again" };
+    user = await r.json();
+  } catch (e) { return { reason: "login check failed, retrying" } }
+  if (!user || !user.id) return { reason: "sign in again" };
+  const email = String(user.email || "").toLowerCase();
+  if (ALLOWED.length && ALLOWED.indexOf(email) < 0) return { reason: "this account is not on the player list" };
+  let exp = Date.now() + 600000;
+  try { exp = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString()).exp * 1000 || exp } catch (e) {}
+  return { user: { id: String(user.id), email: email, exp: exp } };
+}
 
 /* ORANGE PHONE: hand written grooves. The pad slot exists in every groove and starts silent. */
 const GROOVES = {
@@ -133,7 +170,7 @@ async function getRoom(app, name) {
   const id = app + ":" + name;
   let room = rooms.get(id);
   if (!room) {
-    room = { id: id, app: app, sockets: new Set(), loop: newLoop(), board: { snap: null, changes: {} }, boardTimer: null };
+    room = { id: id, app: app, sockets: new Set(), loop: newLoop(), board: { snap: null, changes: {} }, boardTimer: null, beats: new Map(), lastStart: Date.now() };
     rooms.set(id, room);
     room.ready = (async () => {
       const [loop, board] = await Promise.all([load("loop:" + id), load("board:" + id)]);
@@ -151,11 +188,36 @@ function broadcast(room, msg, except) {
 }
 function loopMessage(room) {
   fold(room.loop, Date.now());
-  return { type: "loop", app: room.app, state: room.loop, grooves: Object.keys(GROOVES), now: Date.now() };
+  return { type: "loop", app: room.app, state: room.loop, grooves: Object.keys(GROOVES), now: Date.now(), auth: AUTH_ON, players: room.beats.size };
 }
 function saveBoardSoon(room) {
   if (room.boardTimer) return;
   room.boardTimer = setTimeout(() => { room.boardTimer = null; save("board:" + room.id, room.board) }, 1000);
+}
+
+/* ---------- heartbeat gate ---------- */
+function startLoop(room, now) {
+  const s = room.loop;
+  s.playing = true; s.idle = false; s.epoch = now + 300; s.barOffset = 0; s.pending = null;
+  room.lastStart = now;
+}
+/* ORANGE PHONE: added heartbeat gate. One key per active player, in memory and in Redis with a 20 second expiry. */
+function beat(room, ws) {
+  const id = ws.user ? ws.user.id : ws.device, now = Date.now();
+  room.beats.set(id, now);
+  if (redis) redis.set(PREFIX + "beat:" + room.id + ":" + id, "1", "EX", BEAT_SECONDS).catch(() => {});
+  if (room.loop.idle && !room.loop.playing) {
+    startLoop(room, now);
+    save("loop:" + room.id, room.loop); broadcast(room, loopMessage(room));
+  }
+}
+function gate(room, now) {
+  room.beats.forEach((t, id) => { if (now - t > BEAT_SECONDS * 1000) room.beats.delete(id) });
+  if (room.loop.playing && !room.beats.size && now - room.lastStart > START_GRACE_MS) {
+    room.loop.playing = false; room.loop.pending = null; room.loop.idle = true;
+    save("loop:" + room.id, room.loop); broadcast(room, loopMessage(room));
+    console.log("gate: no active player, loop stopped in " + room.id);
+  }
 }
 
 /* ---------- loop control ---------- */
@@ -164,12 +226,12 @@ function transport(room, m) {
   fold(s, now);
   if (m.action === "start") {
     if (s.playing) return false;
-    s.playing = true; s.epoch = now + 300; s.barOffset = 0; s.pending = null;
+    startLoop(room, now);
     return true;
   }
   if (m.action === "stop") {
     if (!s.playing) return false;
-    s.playing = false; s.pending = null;
+    s.playing = false; s.pending = null; s.idle = false;
     return true;
   }
   const next = s.pending
@@ -200,7 +262,7 @@ function onMessage(room, ws, text) {
   if (typeof m.schema === "number") ws.schema = m.schema;
   m.app = room.app; m.device = ws.device;
 
-  if (m.type === "ping") { sendTo(ws, { type: "pong", app: room.app, t0: m.t0, t1: Date.now() }); return }
+  if (m.type === "beat") { beat(room, ws); return }
   if (m.type === "transport") {
     if (transport(room, m)) { save("loop:" + room.id, room.loop); broadcast(room, loopMessage(room)) }
     return;
@@ -243,7 +305,7 @@ const server = http.createServer((req, res) => {
   if (req.url === "/health") {
     let phones = 0; rooms.forEach(r => { phones += r.sockets.size });
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, rooms: rooms.size, phones: phones, redis: redis ? redis.status : "off" }));
+    res.end(JSON.stringify({ ok: true, version: 3, rooms: rooms.size, phones: phones, redis: redis ? redis.status : "off", login: AUTH_ON ? "on" : "off" }));
     return;
   }
   res.writeHead(200, { "content-type": "text/plain" });
@@ -261,31 +323,69 @@ wss.on("connection", async (ws, req) => {
   ws.device = clean(q.get("device"), 64, /[^a-z0-9-]/g);
   if (!app || !name || !ws.device) { ws.close(1008, "app, room and device are required"); return }
 
-  /* Messages that arrive while the room loads from Redis wait in a short queue. */
-  const early = []; let room = null;
-  ws.on("message", data => { const text = data.toString(); if (room) onMessage(room, ws, text); else if (early.length < 20) early.push(text) });
-  ws.alive = true; ws.on("pong", () => { ws.alive = true });
-
-  const loaded = await getRoom(app, name);
-  if (ws.readyState !== 1) return;
-  if (loaded.sockets.size >= MAX_PHONES_PER_ROOM) { ws.close(1013, "room full"); return }
-  loaded.sockets.add(ws);
+  /* ORANGE PHONE: a phone enters its room at once while login is off, or after its token checks out while login is on.
+     Until then only clock pings and the login message are answered. Other messages wait in a short queue. */
+  const early = []; let room = null, entering = false;
+  async function enter() {
+    if (room || entering) return;
+    entering = true;
+    const loaded = await getRoom(app, name);
+    if (ws.readyState !== 1) return;
+    if (loaded.sockets.size >= MAX_PHONES_PER_ROOM) { ws.close(1013, "room full"); return }
+    loaded.sockets.add(ws);
+    room = loaded;
+    early.forEach(text => onMessage(room, ws, text));
+    early.length = 0;
+    welcome(room, ws);
+  }
   ws.on("close", () => {
-    loaded.sockets.delete(ws);
-    if (!loaded.sockets.size) {
-      if (loaded.boardTimer) { clearTimeout(loaded.boardTimer); loaded.boardTimer = null; save("board:" + loaded.id, loaded.board) }
-      if (redis) rooms.delete(loaded.id);
+    if (!room) return;
+    room.sockets.delete(ws);
+    if (!room.sockets.size) {
+      if (room.boardTimer) { clearTimeout(room.boardTimer); room.boardTimer = null; save("board:" + room.id, room.board) }
+      if (redis && !room.loop.playing) rooms.delete(room.id);
     }
   });
-  room = loaded;
-  early.forEach(text => onMessage(room, ws, text));
-  welcome(room, ws);
+  ws.on("message", async data => {
+    const text = data.toString();
+    let head = null;
+    if (text.length < 5000) { try { head = JSON.parse(text) } catch (e) { return } }
+    if (head && head.type === "ping") { sendTo(ws, { type: "pong", app: app, t0: head.t0, t1: Date.now() }); return }
+    if (head && head.type === "auth") {
+      if (!AUTH_ON) return;
+      const result = await verify(head.token);
+      if (ws.readyState !== 1) return;
+      if (!result.user) { sendTo(ws, { type: "auth", app: app, ok: false, reason: result.reason }); return }
+      ws.user = result.user;
+      sendTo(ws, { type: "auth", app: app, ok: true, email: result.user.email });
+      enter();
+      return;
+    }
+    if (room) onMessage(room, ws, text); else if (early.length < 20) early.push(text);
+  });
+  ws.alive = true; ws.on("pong", () => { ws.alive = true });
+  ws.opened = Date.now();
+  if (!AUTH_ON) enter();
 });
+
+/* Every few seconds: run the heartbeat gate, and close phones whose login is missing or ran out. */
+const gateTimer = setInterval(() => {
+  const now = Date.now();
+  rooms.forEach(room => {
+    gate(room, now);
+    if (redis && !room.sockets.size && !room.loop.playing) rooms.delete(room.id);
+  });
+  if (!AUTH_ON) return;
+  wss.clients.forEach(ws => {
+    if (!ws.user) { if (now - ws.opened > AUTH_WAIT_MS) ws.close(1008, "sign in") }
+    else if (now > ws.user.exp + 30000) ws.close(1008, "login expired");
+  });
+}, 5000);
 
 /* Drop phones that stopped answering. */
 const sweep = setInterval(() => {
   wss.clients.forEach(ws => { if (!ws.alive) { ws.terminate(); return } ws.alive = false; try { ws.ping() } catch (e) {} });
 }, 25000);
 
-server.listen(PORT, () => console.log("stompbox-lab server on port " + PORT + ", redis " + (redis ? "on" : "off")));
-process.on("SIGTERM", () => { clearInterval(sweep); wss.clients.forEach(ws => ws.close(1001)); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000) });
+server.listen(PORT, () => console.log("stompbox-lab server on port " + PORT + ", redis " + (redis ? "on" : "off") + ", login " + (AUTH_ON ? "on" : "off")));
+process.on("SIGTERM", () => { clearInterval(sweep); clearInterval(gateTimer); wss.clients.forEach(ws => ws.close(1001)); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000) });

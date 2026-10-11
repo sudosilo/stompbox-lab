@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <script>try{if(localStorage.getItem("stompbox-lab-theme")==="dark")document.documentElement.dataset.theme="dark"}catch(e){}</script>
-<title>Stompbox Lab v2</title>
+<title>Stompbox Lab v3</title>
 <style>
 /* Layout: a pedalboard on a stage. Header rack strip, grid of stompboxes, keyboard pinned to the bottom edge. Light and dark themes, chosen with the Theme switch. */
 :root{
@@ -118,7 +118,7 @@ button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid v
 <div class="app">
   <header class="wrap">
     <div class="toprow">
-      <h1>Stompbox Lab<small>V2</small></h1>
+      <h1>Stompbox Lab<small>V3</small></h1>
       <div class="scope"><canvas id="scope"></canvas></div>
     </div>
     <div class="rack">
@@ -144,6 +144,16 @@ button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid v
       <span class="label">Board</span>
       <input class="room" id="room" type="text" inputmode="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="24" placeholder="room code" aria-label="Room code">
       <span class="status" id="syncStatus" data-s="off">Sync off</span>
+    </div>
+    <div class="rack" id="playerRack" hidden>
+      <span class="label">Player</span>
+      <input class="room" id="authEmail" type="email" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="email" aria-label="Email">
+      <input class="room" id="authPass" type="password" autocomplete="current-password" placeholder="password" aria-label="Password">
+      <button class="chip" id="authIn">Sign in</button>
+      <button class="chip" id="authUp">Create account</button>
+      <span class="status" id="authWho" data-s="live" hidden></span>
+      <button class="chip" id="authOut" hidden>Sign out</button>
+      <span class="status" id="authMsg" data-s="off" hidden></span>
     </div>
     <div class="rack">
       <span class="label">Loop</span>
@@ -186,13 +196,15 @@ button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid v
   </div>
 </div>
 
-<script src="stompbox-lab-v2-config.js"></script>
-<script src="stompbox-lab-v2-sync.js"></script>
+<script src="stompbox-lab-v3-config.js"></script>
+<script src="stompbox-lab-v3-supabase.js"></script>
+<script src="stompbox-lab-v3-auth.js"></script>
+<script src="stompbox-lab-v3-sync.js"></script>
 <script src="stompbox-lab-v2-clock.js"></script>
 <script src="stompbox-lab-v2-loop.js"></script>
 <script>
 /* ---------- sync settings ---------- */
-/* SYNC_URL is the backend address, read from stompbox-lab-v2-config.js. While it is blank, sync is off and the app runs on this phone alone.
+/* SYNC_URL is the backend address, read from stompbox-lab-v3-config.js. While it is blank, sync is off and the app runs on this phone alone.
    SCHEMA rises whenever the shape of the board snapshot changes. */
 const APP = "stompbox-lab";
 const SCHEMA = 1;
@@ -387,13 +399,21 @@ const clock=createServerClock({
     clockStat.textContent=clock.synced?"clock locked, trip "+Math.round(rtt)+" ms":"clock off";
   },
 });
+/* ORANGE PHONE: added Supabase login. While the Supabase values are missing, login is off and the room is open. */
+const SUPA=window.STOMPBOX_LAB_SUPABASE||{};
+const auth=createAuth({app:APP,url:SUPA.url||"",key:SUPA.key||"",onChange:()=>{
+  renderAuth();
+  if(sync.status==="live"&&auth.token)sync.send("auth",{token:auth.token});else sync.connect();
+}});
 const sync=createBoardSync({
   app:APP,schema:SCHEMA,url:SYNC_URL,
+  ready:()=>!auth.on||!!auth.token,
+  onOpen:()=>{if(auth.on)sync.send("auth",{token:auth.token})},
   exportState:exportState,loadState:loadState,
   applyChange:(path,value)=>change(path,value,true),
   onStatus:s=>{
     statusEl.dataset.s=s;statusEl.textContent= s==="off" ? "Sync off" : s;
-    if(s==="live")clock.start();else{clock.stop();loop.setState(null);renderLoop()}
+    if(s==="live"){clock.start();beat()}else{clock.stop();loop.setState(null);renderLoop()}
   },
 });
 
@@ -415,7 +435,7 @@ function renderLoop(){
   goEl.dataset.mode=mode;goEl.textContent=mode==="play"?"Play":mode==="stop"?"Stop":"Join";
   if(t)bpmOut.textContent=t.tempo+" bpm";
   posEl.dataset.s=st&&st.playing?"live":"off";
-  if(!st||!st.playing){lastPos="";posEl.textContent="stopped"}
+  if(!st||!st.playing){lastPos="";posEl.textContent=st&&st.idle?"paused, no player":"stopped"}
   grooveBox.querySelectorAll("button").forEach(b=>{b.disabled=!st;b.setAttribute("aria-pressed",!!t&&b.dataset.g===t.groove)});
 }
 function buildGrooves(names){
@@ -429,14 +449,51 @@ sync.on("loop",m=>{if(Array.isArray(m.grooves))buildGrooves(m.grooves.map(String
 goEl.addEventListener("click",()=>{
   const st=loop.state;if(!st)return;
   initAudio();
-  if(!st.playing){loop.arm(true);sync.send("transport",{action:"start"})}
-  else if(!loop.armed)loop.arm(true);
+  if(!st.playing){loop.arm(true);beat();sync.send("transport",{action:"start"})}
+  else if(!loop.armed){loop.arm(true);beat()}
   else sync.send("transport",{action:"stop"});
   renderLoop();
 });
 const bumpTempo=d=>{const t=target();if(t)sync.send("transport",{action:"tempo",tempo:Math.min(200,Math.max(50,t.tempo+d))})};
 document.getElementById("bpmDn").addEventListener("click",()=>bumpTempo(-4));
 document.getElementById("bpmUp").addEventListener("click",()=>bumpTempo(4));
+/* ORANGE PHONE: added heartbeat. A phone that is playing and on screen tells the server every 10 seconds.
+   The server stops the loop when no phone has done so for 20 seconds. */
+function beat(){if(loop.armed&&sync.status==="live"&&document.visibilityState==="visible")sync.send("beat")}
+setInterval(beat,10000);
+document.addEventListener("visibilitychange",beat);
+
+/* ---------- player login ---------- */
+const emailEl=document.getElementById("authEmail"),passEl=document.getElementById("authPass"),authMsg=document.getElementById("authMsg");
+function say(text){authMsg.textContent=text||"";authMsg.hidden=!text}
+function renderAuth(){
+  document.getElementById("playerRack").hidden=!auth.on;
+  const signedIn=!!auth.token;
+  [emailEl,passEl,document.getElementById("authIn"),document.getElementById("authUp")].forEach(el=>el.hidden=signedIn);
+  document.getElementById("authWho").hidden=!signedIn;document.getElementById("authWho").textContent=auth.email;
+  document.getElementById("authOut").hidden=!signedIn;
+  if(signedIn)say("");
+}
+async function login(create){
+  const email=emailEl.value.trim(),password=passEl.value;
+  if(!email||password.length<6){say("enter an email and a password of six characters or more");return}
+  say("working");
+  try{
+    if(create){if(await auth.signUp(email,password)==="confirm")say("check your email, open the link, then sign in here")}
+    else await auth.signIn(email,password);
+    passEl.value="";
+  }catch(e){say(e.message)}
+}
+document.getElementById("authIn").addEventListener("click",()=>login(false));
+document.getElementById("authUp").addEventListener("click",()=>login(true));
+document.getElementById("authOut").addEventListener("click",()=>auth.signOut());
+[emailEl,passEl].forEach(el=>{
+  el.addEventListener("keydown",e=>{e.stopPropagation();if(e.key==="Enter"&&el===passEl)login(false)});
+  el.addEventListener("keyup",e=>e.stopPropagation());
+});
+sync.on("auth",m=>{if(!m.ok){say(m.reason||"sign in again");auth.refresh()}});
+renderAuth();
+
 /* The part this phone plays and its timing trim belong to the phone, so they are not synced. */
 function setSlot(id){loop.setSlot(id);keep(APP+"-slot",id);document.querySelectorAll("#slots button").forEach(b=>b.setAttribute("aria-pressed",b.dataset.s===id))}
 document.querySelectorAll("#slots button").forEach(b=>b.addEventListener("click",()=>setSlot(b.dataset.s)));
