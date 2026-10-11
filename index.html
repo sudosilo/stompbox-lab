@@ -3,23 +3,34 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="color-scheme" content="light">
+<meta name="color-scheme" content="light dark">
+<script>try{if(localStorage.getItem("stompbox-lab-theme")==="dark")document.documentElement.dataset.theme="dark"}catch(e){}</script>
 <title>Stompbox Lab v1</title>
 <style>
-/* Layout: a pedalboard on a light stage. Header rack strip, grid of stompboxes, keyboard pinned to the bottom edge. Light theme only. */
+/* Layout: a pedalboard on a stage. Header rack strip, grid of stompboxes, keyboard pinned to the bottom edge. Light and dark themes, chosen with the Theme switch. */
 :root{
   --board:#f1ece4; --rail:#e2dbd0; --edge:#cbc2b4; --ink:#1d1a20; --muted:#6b6470;
   --led:#ff3b30; --chrome-hi:#f4f4f6; --chrome-lo:#6d6a73;
   --f-display:"Arial Black", Impact, "Helvetica Neue", sans-serif;
   --f-body:system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --f-mono:ui-monospace, Menlo, Consolas, monospace;
+  --panel:#fbf8f3; --scope-bg:#f4faf5; --scope-edge:#b9d3bf; --scope-glow:rgba(18,132,58,.12); --trace:#12843a; --trace-idle:#9cc9aa;
+  --bar-a:#ebe5db; --bar-b:#ddd5c8; --dot:rgba(0,0,0,.05); --focus:#b06a00; --accent:#c98a00; --idle-dot:#b9b0a3;
+  --drop:rgba(60,48,36,.3); --drop-soft:rgba(60,48,36,.22); --bar-shadow:rgba(60,48,36,.16); --gap:#8d867c;
   color-scheme:light;
+}
+:root[data-theme="dark"]{
+  --board:#16141a; --rail:#2c2832; --edge:#3a3541; --ink:#efe9f2; --muted:#9a93a3;
+  --panel:#2c2832; --scope-bg:#0b0f0c; --scope-edge:#2a3a2e; --scope-glow:rgba(0,0,0,.8); --trace:#5dff8f; --trace-idle:#1f5c33;
+  --bar-a:#26222b; --bar-b:#141216; --dot:rgba(255,255,255,.035); --focus:#ffd166; --accent:#ffd166; --idle-dot:#5a5361;
+  --drop:rgba(0,0,0,.45); --drop-soft:rgba(0,0,0,.5); --bar-shadow:rgba(0,0,0,.5); --gap:#000;
+  color-scheme:dark;
 }
 *{box-sizing:border-box}
 html,body{height:100%}
 html{padding-top:env(safe-area-inset-top,0px)}
 body{margin:0;background:var(--board);color:var(--ink);font:14px var(--f-body);
-  background-image:radial-gradient(circle at 1px 1px, rgba(0,0,0,.05) 1px, transparent 0);background-size:6px 6px;
+  background-image:radial-gradient(circle at 1px 1px, var(--dot) 1px, transparent 0);background-size:6px 6px;
   -webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
 [hidden]{display:none!important}
 .app{display:flex;flex-direction:column;min-height:100%}
@@ -30,7 +41,7 @@ header{padding-block:16px 8px;display:grid;gap:12px}
 .toprow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 h1{font-family:var(--f-display);font-weight:900;font-size:1.5rem;margin:0;letter-spacing:.02em;line-height:1;text-transform:uppercase}
 h1 small{font-family:var(--f-mono);font-weight:600;font-size:.7rem;color:var(--muted);letter-spacing:.1em;margin-left:6px;vertical-align:middle}
-.scope{flex:1 1 160px;min-width:0;height:44px;border-radius:8px;background:#f4faf5;border:1px solid #b9d3bf;box-shadow:inset 0 0 8px rgba(18,132,58,.12)}
+.scope{flex:1 1 160px;min-width:0;height:44px;border-radius:8px;background:var(--scope-bg);border:1px solid var(--scope-edge);box-shadow:inset 0 0 8px var(--scope-glow)}
 .scope canvas{width:100%;height:100%;display:block}
 .rack{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .label{font-family:var(--f-mono);font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
@@ -38,24 +49,24 @@ h1 small{font-family:var(--f-mono);font-weight:600;font-size:.7rem;color:var(--m
 .seg button,.chip{font:600 .78rem var(--f-body);color:var(--ink);background:transparent;border:0;border-radius:999px;padding:7px 12px;cursor:pointer}
 .seg button[aria-pressed="true"]{background:var(--ink);color:var(--board)}
 .chips{display:flex;gap:6px;flex-wrap:wrap}
-.chip{background:#fbf8f3;border:1px solid var(--edge)}
+.chip{background:var(--panel);border:1px solid var(--edge)}
 .chip:active{transform:translateY(1px)}
-button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid #b06a00;outline-offset:2px}
+button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .hint{font-size:.8rem;color:var(--muted);margin:0}
 .hint b{color:var(--ink)}
-.room{font:600 .8rem var(--f-mono);color:var(--ink);background:#fbf8f3;border:1px solid var(--edge);border-radius:999px;padding:7px 12px;width:11.5em;
+.room{font:600 .8rem var(--f-mono);color:var(--ink);background:var(--panel);border:1px solid var(--edge);border-radius:999px;padding:7px 12px;width:11.5em;
   user-select:text;-webkit-user-select:text}
 .status{font:600 .7rem var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:6px}
-.status::before{content:"";width:8px;height:8px;border-radius:50%;background:#b9b0a3}
+.status::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--idle-dot)}
 .status[data-s="live"]::before{background:#12843a}
-.status[data-s="connecting"]::before,.status[data-s="reconnecting"]::before{background:#c98a00}
+.status[data-s="connecting"]::before,.status[data-s="reconnecting"]::before{background:var(--accent)}
 .status[data-s="update needed"]::before{background:var(--led)}
 
 /* pedalboard */
 .board{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;padding-block:8px 20px}
 .pedal{--c:#888;position:relative;border-radius:14px;padding:14px 10px 12px;display:grid;gap:10px;justify-items:center;
   background:linear-gradient(170deg, color-mix(in srgb,var(--c) 100%, #fff 18%) 0%, var(--c) 30%, color-mix(in srgb,var(--c) 70%, #000) 100%);
-  box-shadow:0 8px 0 -2px rgba(60,48,36,.3), 0 12px 18px rgba(60,48,36,.22), inset 0 1px 0 rgba(255,255,255,.35);
+  box-shadow:0 8px 0 -2px var(--drop), 0 12px 18px var(--drop-soft), inset 0 1px 0 rgba(255,255,255,.35);
   color:#1a1418}
 .pedal::before,.pedal::after{content:"";position:absolute;width:7px;height:7px;border-radius:50%;top:7px;
   background:radial-gradient(circle at 35% 35%,#eee,#777 70%)}
@@ -77,16 +88,16 @@ button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid #
 .stomp:active{transform:scale(.95)}
 
 /* keyboard */
-.keysbar{position:sticky;bottom:0;margin-top:auto;background:linear-gradient(#ebe5db,#ddd5c8);border-top:1px solid var(--edge);
-  padding-bottom:env(safe-area-inset-bottom,0px);box-shadow:0 -8px 20px rgba(60,48,36,.16);z-index:5}
+.keysbar{position:sticky;bottom:0;margin-top:auto;background:linear-gradient(var(--bar-a),var(--bar-b));border-top:1px solid var(--edge);
+  padding-bottom:env(safe-area-inset-bottom,0px);box-shadow:0 -8px 20px var(--bar-shadow);z-index:5}
 .keysbar .wrap{padding-block:8px 12px;display:grid;gap:8px}
 .kbctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .oct{display:flex;align-items:center;gap:6px}
-.oct button{width:34px;height:30px;border-radius:8px;border:1px solid var(--edge);background:#fbf8f3;color:var(--ink);font:800 1rem var(--f-body);cursor:pointer}
+.oct button{width:34px;height:30px;border-radius:8px;border:1px solid var(--edge);background:var(--panel);color:var(--ink);font:800 1rem var(--f-body);cursor:pointer}
 .oct output{font:600 .85rem var(--f-mono);min-width:5ch;text-align:center;font-variant-numeric:tabular-nums}
 .vol{margin-left:auto;display:flex;align-items:center;gap:8px}
-.vol input{width:110px;accent-color:#c98a00}
-.keys{position:relative;height:140px;touch-action:none;border-radius:6px;overflow:hidden;background:#8d867c;border:1px solid #8d867c}
+.vol input{width:110px;accent-color:var(--accent)}
+.keys{position:relative;height:140px;touch-action:none;border-radius:6px;overflow:hidden;background:var(--gap);border:1px solid var(--gap)}
 .wk,.bk{position:absolute;top:0;display:flex;align-items:flex-end;justify-content:center;
   font:600 .6rem var(--f-mono);text-transform:uppercase;padding-bottom:6px}
 .wk{height:100%;background:linear-gradient(#ffffff,#ece6dc);border-right:1px solid #9d968c;border-radius:0 0 5px 5px;color:#8a8278}
@@ -115,6 +126,13 @@ button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid #
     <div class="rack">
       <span class="label">Presets</span>
       <div class="chips" id="presets"></div>
+    </div>
+    <div class="rack">
+      <span class="label">Theme</span>
+      <div class="seg" id="themes">
+        <button data-t="light" aria-pressed="true">Light</button>
+        <button data-t="dark" aria-pressed="false">Dark</button>
+      </div>
     </div>
     <div class="rack">
       <span class="label">Board</span>
@@ -374,13 +392,28 @@ buildKeys();
 
 /* ---------- scope ---------- */
 const cv=document.getElementById("scope"),g2=cv.getContext("2d");
+let trace="#12843a",traceIdle="#9cc9aa";
+
+/* ---------- theme ---------- */
+/* The theme belongs to the phone. It is stored on the phone and is not part of the board snapshot. */
+function setTheme(t){
+  t= t==="dark" ? "dark" : "light";
+  document.documentElement.dataset.theme=t;
+  try{localStorage.setItem("stompbox-lab-theme",t)}catch(e){}
+  document.querySelectorAll("#themes button").forEach(b=>b.setAttribute("aria-pressed",b.dataset.t===t));
+  const cs=getComputedStyle(document.documentElement);
+  trace=cs.getPropertyValue("--trace").trim();traceIdle=cs.getPropertyValue("--trace-idle").trim();
+  if(!analyser&&cv.width)idleScope();
+}
+document.querySelectorAll("#themes button").forEach(b=>b.addEventListener("click",()=>setTheme(b.dataset.t)));
+setTheme(document.documentElement.dataset.theme);
 function sizeScope(){const r=cv.getBoundingClientRect(),d=devicePixelRatio||1;cv.width=r.width*d;cv.height=r.height*d;if(!analyser)idleScope()}
-function idleScope(){g2.clearRect(0,0,cv.width,cv.height);g2.strokeStyle="#9cc9aa";g2.lineWidth=2;g2.beginPath();g2.moveTo(0,cv.height/2);g2.lineTo(cv.width,cv.height/2);g2.stroke()}
+function idleScope(){g2.clearRect(0,0,cv.width,cv.height);g2.strokeStyle=traceIdle;g2.lineWidth=2;g2.beginPath();g2.moveTo(0,cv.height/2);g2.lineTo(cv.width,cv.height/2);g2.stroke()}
 addEventListener("resize",sizeScope);sizeScope();
 let buf;
 function drawScope(){
   buf=buf||new Uint8Array(analyser.fftSize);analyser.getByteTimeDomainData(buf);
-  const w=cv.width,h=cv.height;g2.clearRect(0,0,w,h);g2.strokeStyle="#12843a";g2.lineWidth=2*(devicePixelRatio||1);
+  const w=cv.width,h=cv.height;g2.clearRect(0,0,w,h);g2.strokeStyle=trace;g2.lineWidth=2*(devicePixelRatio||1);
   g2.beginPath();
   for(let i=0;i<buf.length;i++){const x=i/buf.length*w,y=buf[i]/255*h;i?g2.lineTo(x,y):g2.moveTo(x,y)}
   g2.stroke();requestAnimationFrame(drawScope);
