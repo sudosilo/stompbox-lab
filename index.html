@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<title>Stompbox Lab v1</title>
+<style>
+/* Layout: a pedalboard on a light stage. Header rack strip, grid of stompboxes, keyboard pinned to the bottom edge. Light theme only. */
+:root{
+  --board:#f1ece4; --rail:#e2dbd0; --edge:#cbc2b4; --ink:#1d1a20; --muted:#6b6470;
+  --led:#ff3b30; --chrome-hi:#f4f4f6; --chrome-lo:#6d6a73;
+  --f-display:"Arial Black", Impact, "Helvetica Neue", sans-serif;
+  --f-body:system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --f-mono:ui-monospace, Menlo, Consolas, monospace;
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+html{padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--board);color:var(--ink);font:14px var(--f-body);
+  background-image:radial-gradient(circle at 1px 1px, rgba(0,0,0,.05) 1px, transparent 0);background-size:6px 6px;
+  -webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
+[hidden]{display:none!important}
+.app{display:flex;flex-direction:column;min-height:100%}
+.wrap{padding-inline:16px;max-width:1100px;margin:0 auto;width:100%}
+
+/* header rack */
+header{padding-block:16px 8px;display:grid;gap:12px}
+.toprow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+h1{font-family:var(--f-display);font-weight:900;font-size:1.5rem;margin:0;letter-spacing:.02em;line-height:1;text-transform:uppercase}
+h1 small{font-family:var(--f-mono);font-weight:600;font-size:.7rem;color:var(--muted);letter-spacing:.1em;margin-left:6px;vertical-align:middle}
+.scope{flex:1 1 160px;min-width:0;height:44px;border-radius:8px;background:#f4faf5;border:1px solid #b9d3bf;box-shadow:inset 0 0 8px rgba(18,132,58,.12)}
+.scope canvas{width:100%;height:100%;display:block}
+.rack{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.label{font-family:var(--f-mono);font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.seg{display:flex;background:var(--rail);border-radius:999px;padding:3px;gap:2px}
+.seg button,.chip{font:600 .78rem var(--f-body);color:var(--ink);background:transparent;border:0;border-radius:999px;padding:7px 12px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--board)}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{background:#fbf8f3;border:1px solid var(--edge)}
+.chip:active{transform:translateY(1px)}
+button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid #b06a00;outline-offset:2px}
+.hint{font-size:.8rem;color:var(--muted);margin:0}
+.hint b{color:var(--ink)}
+.room{font:600 .8rem var(--f-mono);color:var(--ink);background:#fbf8f3;border:1px solid var(--edge);border-radius:999px;padding:7px 12px;width:11.5em;
+  user-select:text;-webkit-user-select:text}
+.status{font:600 .7rem var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:6px}
+.status::before{content:"";width:8px;height:8px;border-radius:50%;background:#b9b0a3}
+.status[data-s="live"]::before{background:#12843a}
+.status[data-s="connecting"]::before,.status[data-s="reconnecting"]::before{background:#c98a00}
+.status[data-s="update needed"]::before{background:var(--led)}
+
+/* pedalboard */
+.board{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;padding-block:8px 20px}
+.pedal{--c:#888;position:relative;border-radius:14px;padding:14px 10px 12px;display:grid;gap:10px;justify-items:center;
+  background:linear-gradient(170deg, color-mix(in srgb,var(--c) 100%, #fff 18%) 0%, var(--c) 30%, color-mix(in srgb,var(--c) 70%, #000) 100%);
+  box-shadow:0 8px 0 -2px rgba(60,48,36,.3), 0 12px 18px rgba(60,48,36,.22), inset 0 1px 0 rgba(255,255,255,.35);
+  color:#1a1418}
+.pedal::before,.pedal::after{content:"";position:absolute;width:7px;height:7px;border-radius:50%;top:7px;
+  background:radial-gradient(circle at 35% 35%,#eee,#777 70%)}
+.pedal::before{left:7px}.pedal::after{right:7px}
+.knobs{display:flex;gap:6px;justify-content:center;flex-wrap:wrap}
+.kw{display:grid;justify-items:center;gap:3px;width:46px}
+.knob{width:40px;height:40px;border-radius:50%;cursor:ns-resize;touch-action:none;position:relative;
+  background:radial-gradient(circle at 40% 30%,#4a4650,#141216 75%);box-shadow:0 3px 4px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.2)}
+.knob i{position:absolute;left:50%;top:4px;width:3px;height:13px;margin-left:-1.5px;border-radius:2px;background:#f5f1e8;transform-origin:50% 16px}
+.kw span{font:600 .58rem var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:rgba(20,14,18,.85)}
+.name{font-family:var(--f-display);font-weight:900;font-size:.95rem;line-height:1;text-align:center;color:#120d10;text-transform:uppercase;
+  background:rgba(255,255,255,.6);padding:6px 8px 5px;border-radius:5px;letter-spacing:.03em;width:100%}
+.name em{display:block;font:600 .55rem var(--f-mono);font-style:normal;letter-spacing:.12em;margin-top:3px;opacity:.75}
+.led{width:10px;height:10px;border-radius:50%;background:#7a2a25;box-shadow:inset 0 1px 2px rgba(0,0,0,.5)}
+.pedal.on .led{background:var(--led);box-shadow:0 0 10px 2px rgba(255,59,48,.8), inset 0 -1px 2px rgba(0,0,0,.3)}
+.stomp{width:46px;height:46px;border-radius:50%;border:0;cursor:pointer;
+  background:radial-gradient(circle at 38% 32%,var(--chrome-hi),#b7b5bb 40%,var(--chrome-lo) 80%);
+  box-shadow:0 0 0 5px rgba(0,0,0,.25),0 4px 6px rgba(0,0,0,.4)}
+.stomp:active{transform:scale(.95)}
+
+/* keyboard */
+.keysbar{position:sticky;bottom:0;margin-top:auto;background:linear-gradient(#ebe5db,#ddd5c8);border-top:1px solid var(--edge);
+  padding-bottom:env(safe-area-inset-bottom,0px);box-shadow:0 -8px 20px rgba(60,48,36,.16);z-index:5}
+.keysbar .wrap{padding-block:8px 12px;display:grid;gap:8px}
+.kbctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.oct{display:flex;align-items:center;gap:6px}
+.oct button{width:34px;height:30px;border-radius:8px;border:1px solid var(--edge);background:#fbf8f3;color:var(--ink);font:800 1rem var(--f-body);cursor:pointer}
+.oct output{font:600 .85rem var(--f-mono);min-width:5ch;text-align:center;font-variant-numeric:tabular-nums}
+.vol{margin-left:auto;display:flex;align-items:center;gap:8px}
+.vol input{width:110px;accent-color:#c98a00}
+.keys{position:relative;height:140px;touch-action:none;border-radius:6px;overflow:hidden;background:#8d867c;border:1px solid #8d867c}
+.wk,.bk{position:absolute;top:0;display:flex;align-items:flex-end;justify-content:center;
+  font:600 .6rem var(--f-mono);text-transform:uppercase;padding-bottom:6px}
+.wk{height:100%;background:linear-gradient(#ffffff,#ece6dc);border-right:1px solid #9d968c;border-radius:0 0 5px 5px;color:#8a8278}
+.bk{height:60%;background:linear-gradient(#3a353f,#16131a);border-radius:0 0 4px 4px;z-index:2;color:#b9b2c0;box-shadow:0 3px 3px rgba(0,0,0,.35)}
+.wk.down{background:linear-gradient(#ffd166,#f2b632);color:#5a4100}
+.bk.down{background:linear-gradient(#b8860b,#6b4e05);color:#ffe8a3}
+@media (max-width:520px){ .wk span,.bk span{display:none} .keys{height:128px} .vol input{width:84px} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="wrap">
+    <div class="toprow">
+      <h1>Stompbox Lab<small>V1</small></h1>
+      <div class="scope"><canvas id="scope"></canvas></div>
+    </div>
+    <div class="rack">
+      <span class="label">Sound</span>
+      <div class="seg" id="patches">
+        <button data-p="pluck" aria-pressed="true">Pluck</button>
+        <button data-p="lead" aria-pressed="false">Lead</button>
+        <button data-p="organ" aria-pressed="false">Organ</button>
+      </div>
+    </div>
+    <div class="rack">
+      <span class="label">Presets</span>
+      <div class="chips" id="presets"></div>
+    </div>
+    <div class="rack">
+      <span class="label">Board</span>
+      <input class="room" id="room" type="text" inputmode="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="24" placeholder="room code" aria-label="Room code">
+      <span class="status" id="syncStatus" data-s="off">Sync off</span>
+    </div>
+    <p class="hint" id="hint">Tap a key to power on. Stomp the silver switch to turn a pedal on, drag knobs up or down. On a computer, play with <b>A W S E D F T G Y H U J K</b>, and <b>Z / X</b> shift the octave.</p>
+  </header>
+
+  <main class="wrap"><div class="board" id="board"></div></main>
+
+  <div class="keysbar">
+    <div class="wrap">
+      <div class="kbctl">
+        <div class="oct"><button id="octDn" aria-label="Octave down">-</button><output id="octOut">C3</output><button id="octUp" aria-label="Octave up">+</button></div>
+        <label class="vol"><span class="label">Vol</span><input id="vol" type="range" min="0" max="1" step="0.01" value="0.7"></label>
+      </div>
+      <div class="keys" id="keys"></div>
+    </div>
+  </div>
+</div>
+
+<script src="stompbox-lab-v1-sync.js"></script>
+<script>
+/* ---------- sync settings ---------- */
+/* SYNC_URL is the backend address. While it is blank, sync is off and the app runs on this phone alone.
+   SCHEMA rises whenever the shape of the board snapshot changes. */
+const APP = "stompbox-lab";
+const SCHEMA = 1;
+const SYNC_URL = "";
+
+const PEDALS = [
+  {id:"wah",  name:"Wah Wah",   sub:"CRY FILTER", c:"#d9a521", k:[["sweep","Sweep",.5],["rate","Auto",0],["q","Peak",.6]]},
+  {id:"dist", name:"Fuzzbox",   sub:"DISTORTION", c:"#e2562b", k:[["drive","Drive",.6],["tone","Tone",.5],["level","Level",.5]]},
+  {id:"chorus",name:"Shimmer",  sub:"CHORUS",     c:"#2aa7a1", k:[["rate","Rate",.3],["depth","Depth",.5],["mix","Mix",.5]]},
+  {id:"trem", name:"Wobbler",   sub:"TREMOLO",    c:"#8b6be0", k:[["rate","Speed",.4],["depth","Depth",.6]]},
+  {id:"delay",name:"Echo Echo", sub:"DELAY",      c:"#3d74d8", k:[["time","Time",.35],["feedback","Repeats",.4],["mix","Mix",.35]]},
+  {id:"reverb",name:"Cavern",   sub:"REVERB",     c:"#3c9a5b", k:[["size","Size",.5],["tone","Tone",.6],["mix","Mix",.4]]},
+];
+const S = {}; PEDALS.forEach(p=>{S[p.id]={on:false}; p.k.forEach(([k,,v])=>S[p.id][k]=v)});
+S.reverb.on = true;
+let patch = "pluck";
+
+/* ---------- audio ---------- */
+let ctx, chainIn, master, analyser, N = {};
+const T = ()=>ctx.currentTime;
+const set = (param,v)=>param.setTargetAtTime(v,T(),0.02);
+
+function shell(){const i=ctx.createGain(),o=ctx.createGain(),dry=ctx.createGain(),wet=ctx.createGain();i.connect(dry);dry.connect(o);wet.connect(o);return{in:i,out:o,dry,wet}}
+function lfo(f){const o=ctx.createOscillator();o.frequency.value=f;const g=ctx.createGain();g.gain.value=0;o.connect(g);o.start();return{o,g}}
+
+const BUILD = {
+  wah(){const s=shell();s.f=ctx.createBiquadFilter();s.f.type="bandpass";s.mk=ctx.createGain();
+    s.in.connect(s.f);s.f.connect(s.mk);s.mk.connect(s.wet);s.l=lfo(1);s.l.g.connect(s.f.frequency);return s},
+  dist(){const s=shell();s.hp=ctx.createBiquadFilter();s.hp.type="highpass";s.hp.frequency.value=90;
+    s.pre=ctx.createGain();s.sh=ctx.createWaveShaper();s.sh.oversample="4x";s.lp=ctx.createBiquadFilter();s.lp.type="lowpass";s.lv=ctx.createGain();
+    s.in.connect(s.hp);s.hp.connect(s.pre);s.pre.connect(s.sh);s.sh.connect(s.lp);s.lp.connect(s.lv);s.lv.connect(s.wet);return s},
+  chorus(){const s=shell();s.d=ctx.createDelay(.1);s.d.delayTime.value=.018;s.in.connect(s.d);s.d.connect(s.wet);
+    s.l=lfo(1);s.l.g.connect(s.d.delayTime);return s},
+  trem(){const s=shell();s.tg=ctx.createGain();s.in.connect(s.tg);s.tg.connect(s.wet);s.l=lfo(4);s.l.g.connect(s.tg.gain);return s},
+  delay(){const s=shell();s.d=ctx.createDelay(1.5);s.fb=ctx.createGain();s.lp=ctx.createBiquadFilter();s.lp.type="lowpass";s.lp.frequency.value=3200;
+    s.in.connect(s.d);s.d.connect(s.lp);s.lp.connect(s.fb);s.fb.connect(s.d);s.lp.connect(s.wet);return s},
+  reverb(){const s=shell();s.cv=ctx.createConvolver();s.lp=ctx.createBiquadFilter();s.lp.type="lowpass";
+    s.in.connect(s.cv);s.cv.connect(s.lp);s.lp.connect(s.wet);s.size=-1;return s},
+};
+
+function curve(k){const n=2048,c=new Float32Array(n);for(let i=0;i<n;i++){const x=i*2/n-1;c[i]=Math.tanh(k*x)/Math.tanh(k)}return c}
+function impulse(sec){const r=ctx.sampleRate,len=Math.floor(r*sec),b=ctx.createBuffer(2,len,r);
+  for(let ch=0;ch<2;ch++){const d=b.getChannelData(ch);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,2.6)}return b}
+let revTimer;
+
+const APPLY = {
+  wah(s,p){const base=350+Math.pow(p.sweep,1.4)*1900, r=p.rate*7;
+    set(s.f.frequency,base);set(s.f.Q,2+p.q*14);set(s.mk.gain,2.2+p.q*2.5);
+    s.l.o.frequency.value=Math.max(r,.01);set(s.l.g.gain,r>.05?base*.65:0);
+    set(s.dry.gain,p.on?.12:1);set(s.wet.gain,p.on?1:0)},
+  dist(s,p){s.sh.curve=curve(1+p.drive*45);set(s.pre.gain,1+p.drive*5);
+    set(s.lp.frequency,700+p.tone*p.tone*7500);set(s.lv.gain,p.level*.9);
+    set(s.dry.gain,p.on?0:1);set(s.wet.gain,p.on?1:0)},
+  chorus(s,p){set(s.l.o.frequency,.15+p.rate*4.5);set(s.l.g.gain,.0005+p.depth*.006);
+    set(s.dry.gain,1);set(s.wet.gain,p.on?p.mix*.9:0)},
+  trem(s,p){set(s.l.o.frequency,1.5+p.rate*11);set(s.tg.gain,1-p.depth/2);set(s.l.g.gain,p.depth/2);
+    set(s.dry.gain,p.on?0:1);set(s.wet.gain,p.on?1:0)},
+  delay(s,p){set(s.d.delayTime,.06+p.time*.9);set(s.fb.gain,p.feedback*.82);
+    set(s.dry.gain,1);set(s.wet.gain,p.on?p.mix:0)},
+  reverb(s,p){set(s.lp.frequency,1200+p.tone*9000);set(s.dry.gain,1);set(s.wet.gain,p.on?p.mix*1.4:0);
+    if(Math.abs(s.size-p.size)>.02){clearTimeout(revTimer);revTimer=setTimeout(()=>{s.size=p.size;s.cv.buffer=impulse(.5+p.size*4.5)},s.size<0?0:180)}},
+};
+const apply = id=>{ if(ctx) APPLY[id](N[id],S[id]) };
+
+function initAudio(){
+  if(ctx){ if(ctx.state==="suspended")ctx.resume(); return }
+  ctx=new (window.AudioContext||window.webkitAudioContext)();
+  chainIn=ctx.createGain(); let prev=chainIn;
+  PEDALS.forEach(p=>{const n=BUILD[p.id]();N[p.id]=n;prev.connect(n.in);prev=n.out});
+  const comp=ctx.createDynamicsCompressor();comp.threshold.value=-14;comp.ratio.value=4;
+  master=ctx.createGain();master.gain.value=+volEl.value;analyser=ctx.createAnalyser();analyser.fftSize=1024;
+  prev.connect(comp);comp.connect(master);master.connect(analyser);analyser.connect(ctx.destination);
+  PEDALS.forEach(p=>apply(p.id));
+  document.getElementById("hint").hidden=true;
+  drawScope();
+}
+
+/* ---------- voices ---------- */
+const PATCH = {
+  pluck:{osc:[["sawtooth",0,1],["square",7,.45]], f0:5200,f1:900,fd:.35, a:.003,sus:0,dec:2.4,rel:.3},
+  lead: {osc:[["sawtooth",-8,1],["sawtooth",8,1]], f0:3000,f1:2200,fd:.3, a:.01,sus:.7,dec:.4,rel:.25},
+  organ:{osc:[["sine",0,1],["sine",1200,.5],["sine",1902,.3]], f0:9000,f1:9000,fd:.1, a:.006,sus:.85,dec:.1,rel:.08},
+};
+const voices = new Map();
+const hz = m=>440*Math.pow(2,(m-69)/12);
+function noteOn(m){
+  initAudio(); noteOff(m);
+  const P=PATCH[patch],t=T(),amp=ctx.createGain(),f=ctx.createBiquadFilter();f.type="lowpass";f.Q.value=1.5;
+  f.frequency.setValueAtTime(P.f0,t);f.frequency.setTargetAtTime(P.f1,t,P.fd);
+  amp.gain.setValueAtTime(0,t);amp.gain.linearRampToValueAtTime(.2,t+P.a);
+  amp.gain.setTargetAtTime(.2*P.sus,t+P.a,P.dec/(P.sus?3:4));
+  const oscs=P.osc.map(([type,det,lvl])=>{const o=ctx.createOscillator(),g=ctx.createGain();o.type=type;o.frequency.value=hz(m);o.detune.value=det;g.gain.value=lvl/P.osc.length*1.3;o.connect(g);g.connect(f);o.start(t);return o});
+  f.connect(amp);amp.connect(chainIn);voices.set(m,{amp,oscs,rel:P.rel});setKey(m,true);
+}
+function noteOff(m){
+  const v=voices.get(m);if(!v)return;voices.delete(m);setKey(m,false);
+  const t=T(),g=v.amp.gain;
+  if(g.cancelAndHoldAtTime)g.cancelAndHoldAtTime(t);else{g.cancelScheduledValues(t);g.setValueAtTime(g.value,t)}
+  g.setTargetAtTime(0,t,v.rel/4);v.oscs.forEach(o=>o.stop(t+v.rel*2+.1));
+}
+
+/* ---------- board state: one way in, one way out ---------- */
+/* Every change to the board goes through change(). A path is "pedal.key" such as "wah.sweep" or "dist.on", or "patch".
+   A change made on this phone is handed to sync. A change that arrived from another phone is not sent back out. */
+const clamp = v=>Math.min(1,Math.max(0,+v||0));
+function writePath(path,value){
+  if(path==="patch"){ if(!PATCH[value])return false; setPatch(value); return true }
+  const [pid,key]=String(path).split(".");
+  if(!S[pid]||!(key in S[pid]))return false;
+  S[pid][key]= key==="on" ? !!value : clamp(value);
+  refreshPedal(pid);apply(pid);
+  return true;
+}
+function change(path,value,remote){
+  if(!writePath(path,value))return;
+  if(!remote)sync.change(path, path==="patch" ? patch : S[path.split(".")[0]][path.split(".")[1]]);
+}
+/* The whole board as one JSON snapshot. Volume and octave belong to the phone and are left out. */
+function exportState(){
+  return {schema:SCHEMA,app:APP,patch:patch,pedals:JSON.parse(JSON.stringify(S))};
+}
+/* Load a snapshot into the board. Unknown pedals and unknown keys are skipped. */
+function loadState(snap){
+  if(!snap||snap.app!==APP||snap.schema!==SCHEMA)return false;
+  PEDALS.forEach(p=>{
+    const src=snap.pedals&&snap.pedals[p.id];if(!src)return;
+    Object.keys(S[p.id]).forEach(key=>{ if(key in src) S[p.id][key]= key==="on" ? !!src[key] : clamp(src[key]) });
+    refreshPedal(p.id);apply(p.id);
+  });
+  if(PATCH[snap.patch])setPatch(snap.patch);
+  return true;
+}
+
+/* ---------- pedal UI ---------- */
+const board=document.getElementById("board");
+function knob(pid,key,label){
+  const w=document.createElement("div");w.className="kw";
+  w.innerHTML=`<div class="knob" tabindex="0" role="slider" id="k-${pid}-${key}" aria-label="${label}" aria-valuemin="0" aria-valuemax="10"><i></i></div><span>${label}</span>`;
+  const el=w.firstChild,ind=el.firstChild;
+  const draw=()=>{const v=S[pid][key];ind.style.transform=`rotate(${-135+v*270}deg)`;el.setAttribute("aria-valuenow",(v*10).toFixed(1))};
+  const setV=v=>change(pid+"."+key,v);
+  let y0,v0;
+  el.addEventListener("pointerdown",e=>{el.setPointerCapture(e.pointerId);y0=e.clientY;v0=S[pid][key];e.preventDefault()});
+  el.addEventListener("pointermove",e=>{if(y0==null)return;setV(v0+(y0-e.clientY)/140)});
+  const up=()=>y0=null;el.addEventListener("pointerup",up);el.addEventListener("pointercancel",up);
+  el.addEventListener("keydown",e=>{const d={ArrowUp:.05,ArrowRight:.05,ArrowDown:-.05,ArrowLeft:-.05}[e.key];if(d!=null){setV(S[pid][key]+d);e.preventDefault();e.stopPropagation()}});
+  el._draw=draw;draw();return w;
+}
+const pedalEls={};
+PEDALS.forEach(p=>{
+  const d=document.createElement("section");d.className="pedal";d.style.setProperty("--c",p.c);
+  const kn=document.createElement("div");kn.className="knobs";p.k.forEach(([k,l])=>kn.appendChild(knob(p.id,k,l)));
+  d.appendChild(kn);
+  d.insertAdjacentHTML("beforeend",`<div class="name">${p.name}<em>${p.sub}</em></div><div class="led"></div><button class="stomp" id="sw-${p.id}" aria-label="${p.name} on or off" aria-pressed="false"></button>`);
+  d.querySelector(".stomp").addEventListener("click",()=>{initAudio();change(p.id+".on",!S[p.id].on)});
+  board.appendChild(d);pedalEls[p.id]=d;refreshPedal(p.id);
+});
+function refreshPedal(id){const d=pedalEls[id];if(!d)return;d.classList.toggle("on",S[id].on);d.querySelector(".stomp").setAttribute("aria-pressed",S[id].on);d.querySelectorAll(".knob").forEach(k=>k._draw())}
+
+/* ---------- patches & presets ---------- */
+document.querySelectorAll("#patches button").forEach(b=>b.addEventListener("click",()=>change("patch",b.dataset.p)));
+function setPatch(p){patch=p;document.querySelectorAll("#patches button").forEach(b=>b.setAttribute("aria-pressed",b.dataset.p===p))}
+const PRESETS={
+  "Clean":{patch:"pluck",reverb:{on:1,size:.4,mix:.25}},
+  "Funk Wah":{patch:"pluck",wah:{on:1,rate:.3,q:.75,sweep:.5},dist:{on:1,drive:.25,tone:.6,level:.55},reverb:{on:1,mix:.2}},
+  "Grunge":{patch:"lead",dist:{on:1,drive:.9,tone:.4,level:.5},chorus:{on:1,mix:.35,rate:.2},reverb:{on:1,size:.35,mix:.2}},
+  "Surf":{patch:"pluck",trem:{on:1,rate:.55,depth:.7},reverb:{on:1,size:.6,tone:.8,mix:.5}},
+  "Outer Space":{patch:"lead",chorus:{on:1,depth:.7,mix:.6},delay:{on:1,time:.55,feedback:.62,mix:.45},reverb:{on:1,size:.95,mix:.6}},
+};
+/* A preset touches the whole board, so it is built as a snapshot, loaded, and sent as a snapshot. */
+function applyPreset(cfg){
+  const snap=exportState();
+  PEDALS.forEach(p=>{const c=cfg[p.id]||{};Object.assign(snap.pedals[p.id],c);snap.pedals[p.id].on=!!c.on});
+  snap.patch=cfg.patch;
+  loadState(snap);sync.snapshot();
+}
+const presetBox=document.getElementById("presets");
+Object.entries(PRESETS).forEach(([name,cfg])=>{const b=document.createElement("button");b.className="chip";b.textContent=name;
+  b.addEventListener("click",()=>{initAudio();applyPreset(cfg)});
+  presetBox.appendChild(b)});
+
+/* ---------- sync wiring ---------- */
+const roomEl=document.getElementById("room"),statusEl=document.getElementById("syncStatus");
+const sync=createBoardSync({
+  app:APP,schema:SCHEMA,url:SYNC_URL,
+  exportState:exportState,loadState:loadState,
+  applyChange:(path,value)=>change(path,value,true),
+  onStatus:s=>{statusEl.dataset.s=s;statusEl.textContent= s==="off" ? "Sync off" : s},
+});
+roomEl.value=sync.room;
+roomEl.addEventListener("change",()=>{roomEl.value=sync.setRoom(roomEl.value)});
+roomEl.addEventListener("keydown",e=>{e.stopPropagation();if(e.key==="Enter")roomEl.blur()});
+roomEl.addEventListener("keyup",e=>e.stopPropagation());
+sync.connect();
+window.StompboxLab={exportState:exportState,loadState:loadState,change:change,sync:sync};
+
+/* ---------- keyboard ---------- */
+const keysEl=document.getElementById("keys"),octOut=document.getElementById("octOut"),volEl=document.getElementById("vol");
+const COMP="awsedftgyhujkolp;";
+let base=48; const keyEls=new Map();
+function buildKeys(){
+  [...voices.keys()].forEach(noteOff);keysEl.innerHTML="";keyEls.clear();
+  const whites=15,ww=100/whites,blackSemis=[1,3,6,8,10];let wi=0;
+  for(let s=0;s<=24;s++){
+    const m=base+s,isB=blackSemis.includes(s%12),el=document.createElement("div");
+    el.dataset.m=m;const lbl=COMP[s]?COMP[s]:"";el.innerHTML=`<span>${lbl}</span>`;
+    if(isB){el.className="bk";el.style.left=`calc(${wi*ww}% - ${ww*.32}%)`;el.style.width=ww*.64+"%"}
+    else{el.className="wk";el.style.left=wi*ww+"%";el.style.width=ww+"%";wi++}
+    keysEl.appendChild(el);keyEls.set(m,el);
+  }
+  octOut.textContent="C"+(base/12-1);
+}
+function setKey(m,on){const el=keyEls.get(m);if(el)el.classList.toggle("down",on)}
+const ptrNote=new Map();
+const noteAt=(x,y)=>{const el=document.elementFromPoint(x,y);return el&&el.closest&&el.closest("[data-m]")?+el.closest("[data-m]").dataset.m:null};
+keysEl.addEventListener("pointerdown",e=>{e.preventDefault();keysEl.setPointerCapture(e.pointerId);const m=noteAt(e.clientX,e.clientY);if(m!=null){ptrNote.set(e.pointerId,m);noteOn(m)}});
+keysEl.addEventListener("pointermove",e=>{if(!ptrNote.has(e.pointerId))return;const m=noteAt(e.clientX,e.clientY),old=ptrNote.get(e.pointerId);
+  if(m!==old){if(old!=null)noteOff(old);if(m!=null)noteOn(m);ptrNote.set(e.pointerId,m)}});
+const release=e=>{const m=ptrNote.get(e.pointerId);if(m!=null)noteOff(m);ptrNote.delete(e.pointerId)};
+keysEl.addEventListener("pointerup",release);keysEl.addEventListener("pointercancel",release);
+const shiftOct=d=>{base=Math.min(84,Math.max(24,base+12*d));buildKeys()};
+document.getElementById("octDn").onclick=()=>shiftOct(-1);document.getElementById("octUp").onclick=()=>shiftOct(1);
+const held=new Map();
+addEventListener("keydown",e=>{if(e.repeat||e.metaKey||e.ctrlKey)return;const k=e.key.toLowerCase();
+  if(k==="z")return shiftOct(-1);if(k==="x")return shiftOct(1);
+  const i=COMP.indexOf(k);if(i<0||held.has(k))return;const m=base+i;held.set(k,m);noteOn(m)});
+addEventListener("keyup",e=>{const k=e.key.toLowerCase();if(held.has(k)){noteOff(held.get(k));held.delete(k)}});
+addEventListener("blur",()=>{[...voices.keys()].forEach(noteOff);held.clear()});
+volEl.addEventListener("input",()=>{if(master)set(master.gain,+volEl.value)});
+buildKeys();
+
+/* ---------- scope ---------- */
+const cv=document.getElementById("scope"),g2=cv.getContext("2d");
+function sizeScope(){const r=cv.getBoundingClientRect(),d=devicePixelRatio||1;cv.width=r.width*d;cv.height=r.height*d;if(!analyser)idleScope()}
+function idleScope(){g2.clearRect(0,0,cv.width,cv.height);g2.strokeStyle="#9cc9aa";g2.lineWidth=2;g2.beginPath();g2.moveTo(0,cv.height/2);g2.lineTo(cv.width,cv.height/2);g2.stroke()}
+addEventListener("resize",sizeScope);sizeScope();
+let buf;
+function drawScope(){
+  buf=buf||new Uint8Array(analyser.fftSize);analyser.getByteTimeDomainData(buf);
+  const w=cv.width,h=cv.height;g2.clearRect(0,0,w,h);g2.strokeStyle="#12843a";g2.lineWidth=2*(devicePixelRatio||1);
+  g2.beginPath();
+  for(let i=0;i<buf.length;i++){const x=i/buf.length*w,y=buf[i]/255*h;i?g2.lineTo(x,y):g2.moveTo(x,y)}
+  g2.stroke();requestAnimationFrame(drawScope);
+}
+</script>
+</body>
+</html>
