@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <script>try{if(localStorage.getItem("stompbox-lab-theme")==="dark")document.documentElement.dataset.theme="dark"}catch(e){}</script>
-<title>Stompbox Lab v1</title>
+<title>Stompbox Lab v2</title>
 <style>
 /* Layout: a pedalboard on a stage. Header rack strip, grid of stompboxes, keyboard pinned to the bottom edge. Light and dark themes, chosen with the Theme switch. */
 :root{
@@ -61,6 +61,12 @@ button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid v
 .status[data-s="live"]::before{background:#12843a}
 .status[data-s="connecting"]::before,.status[data-s="reconnecting"]::before{background:var(--accent)}
 .status[data-s="update needed"]::before{background:var(--led)}
+.chip[aria-pressed="true"]{background:var(--ink);color:var(--board);border-color:var(--ink)}
+.chip.go{min-width:5.5em;font-weight:800;background:#12843a;color:#fff;border-color:#0d6a2e}
+.chip.go[data-mode="stop"]{background:#c8372d;border-color:#a32a22}
+.chip.go[data-mode="join"]{background:#c98a00;border-color:#a37000}
+.chip:disabled,.oct button:disabled{opacity:.45;cursor:default}
+.oct output.wide{min-width:7ch}
 
 /* pedalboard */
 .board{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;padding-block:8px 20px}
@@ -112,7 +118,7 @@ button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid v
 <div class="app">
   <header class="wrap">
     <div class="toprow">
-      <h1>Stompbox Lab<small>V1</small></h1>
+      <h1>Stompbox Lab<small>V2</small></h1>
       <div class="scope"><canvas id="scope"></canvas></div>
     </div>
     <div class="rack">
@@ -139,6 +145,31 @@ button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid v
       <input class="room" id="room" type="text" inputmode="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="24" placeholder="room code" aria-label="Room code">
       <span class="status" id="syncStatus" data-s="off">Sync off</span>
     </div>
+    <div class="rack">
+      <span class="label">Loop</span>
+      <button class="chip go" id="loopGo" data-mode="play" disabled>Play</button>
+      <div class="oct"><button id="bpmDn" aria-label="Tempo down" disabled>-</button><output class="wide" id="bpmOut">100 bpm</output><button id="bpmUp" aria-label="Tempo up" disabled>+</button></div>
+      <span class="status" id="loopPos" data-s="off">stopped</span>
+    </div>
+    <div class="rack">
+      <span class="label">Groove</span>
+      <div class="chips" id="grooves"></div>
+    </div>
+    <div class="rack">
+      <span class="label">Part</span>
+      <div class="seg" id="slots">
+        <button data-s="all" aria-pressed="true">All</button>
+        <button data-s="drums" aria-pressed="false">Drums</button>
+        <button data-s="bass" aria-pressed="false">Bass</button>
+        <button data-s="lead" aria-pressed="false">Lead</button>
+        <button data-s="pad" aria-pressed="false">Pad</button>
+      </div>
+    </div>
+    <div class="rack">
+      <span class="label">Timing</span>
+      <div class="oct"><button id="nudgeDn" aria-label="Play earlier">-</button><output class="wide" id="nudgeOut">0 ms</output><button id="nudgeUp" aria-label="Play later">+</button></div>
+      <span class="status" id="clockStat" data-s="off">clock off</span>
+    </div>
     <p class="hint" id="hint">Tap a key to power on. Stomp the silver switch to turn a pedal on, drag knobs up or down. On a computer, play with <b>A W S E D F T G Y H U J K</b>, and <b>Z / X</b> shift the octave.</p>
   </header>
 
@@ -155,14 +186,17 @@ button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid v
   </div>
 </div>
 
-<script src="stompbox-lab-v1-sync.js"></script>
+<script src="stompbox-lab-v2-config.js"></script>
+<script src="stompbox-lab-v2-sync.js"></script>
+<script src="stompbox-lab-v2-clock.js"></script>
+<script src="stompbox-lab-v2-loop.js"></script>
 <script>
 /* ---------- sync settings ---------- */
-/* SYNC_URL is the backend address. While it is blank, sync is off and the app runs on this phone alone.
+/* SYNC_URL is the backend address, read from stompbox-lab-v2-config.js. While it is blank, sync is off and the app runs on this phone alone.
    SCHEMA rises whenever the shape of the board snapshot changes. */
 const APP = "stompbox-lab";
 const SCHEMA = 1;
-const SYNC_URL = "";
+const SYNC_URL = (window.STOMPBOX_LAB_CONFIG && window.STOMPBOX_LAB_CONFIG.syncUrl) || "";
 
 const PEDALS = [
   {id:"wah",  name:"Wah Wah",   sub:"CRY FILTER", c:"#d9a521", k:[["sweep","Sweep",.5],["rate","Auto",0],["q","Peak",.6]]},
@@ -177,7 +211,7 @@ S.reverb.on = true;
 let patch = "pluck";
 
 /* ---------- audio ---------- */
-let ctx, chainIn, master, analyser, N = {};
+let ctx, chainIn, loopBus, master, analyser, N = {};
 const T = ()=>ctx.currentTime;
 const set = (param,v)=>param.setTargetAtTime(v,T(),0.02);
 
@@ -230,6 +264,8 @@ function initAudio(){
   PEDALS.forEach(p=>{const n=BUILD[p.id]();N[p.id]=n;prev.connect(n.in);prev=n.out});
   const comp=ctx.createDynamicsCompressor();comp.threshold.value=-14;comp.ratio.value=4;
   master=ctx.createGain();master.gain.value=+volEl.value;analyser=ctx.createAnalyser();analyser.fftSize=1024;
+  /* ORANGE PHONE: loop drums and bass enter after the pedals, loop lead and pad enter chainIn. */
+  loopBus=ctx.createGain();loopBus.connect(comp);
   prev.connect(comp);comp.connect(master);master.connect(analyser);analyser.connect(ctx.destination);
   PEDALS.forEach(p=>apply(p.id));
   document.getElementById("hint").hidden=true;
@@ -342,18 +378,80 @@ Object.entries(PRESETS).forEach(([name,cfg])=>{const b=document.createElement("b
 
 /* ---------- sync wiring ---------- */
 const roomEl=document.getElementById("room"),statusEl=document.getElementById("syncStatus");
+/* ORANGE PHONE: the clock and the loop share the sync socket. */
+const clockStat=document.getElementById("clockStat");
+const clock=createServerClock({
+  send:m=>sync.send(m.type,m),
+  onChange:(offset,rtt)=>{
+    clockStat.dataset.s=clock.synced?"live":"off";
+    clockStat.textContent=clock.synced?"clock locked, trip "+Math.round(rtt)+" ms":"clock off";
+  },
+});
 const sync=createBoardSync({
   app:APP,schema:SCHEMA,url:SYNC_URL,
   exportState:exportState,loadState:loadState,
   applyChange:(path,value)=>change(path,value,true),
-  onStatus:s=>{statusEl.dataset.s=s;statusEl.textContent= s==="off" ? "Sync off" : s},
+  onStatus:s=>{
+    statusEl.dataset.s=s;statusEl.textContent= s==="off" ? "Sync off" : s;
+    if(s==="live")clock.start();else{clock.stop();loop.setState(null);renderLoop()}
+  },
 });
+
+/* ---------- loop wiring ---------- */
+const goEl=document.getElementById("loopGo"),bpmOut=document.getElementById("bpmOut"),posEl=document.getElementById("loopPos");
+const grooveBox=document.getElementById("grooves"),nudgeOut=document.getElementById("nudgeOut");
+function keep(key,value){try{if(value===undefined)return localStorage.getItem(key);localStorage.setItem(key,value)}catch(e){}return null}
+let lastPos="";
+const loop=createLoop({
+  clock:clock,ctx:()=>ctx,chain:()=>chainIn,bus:()=>loopBus,patches:PATCH,patch:()=>patch,
+  onPos:(bar,beat)=>{const text="bar "+(bar+1)+"."+(beat+1);if(text!==lastPos){lastPos=text;posEl.textContent=text}},
+});
+/* The tempo and groove on screen are the ones the room is heading to, so a queued change shows at once. */
+const target=()=>{const st=loop.state;return st?(st.pending||st):null};
+function renderLoop(){
+  const st=loop.state,t=target();
+  goEl.disabled=!st;document.getElementById("bpmDn").disabled=!st;document.getElementById("bpmUp").disabled=!st;
+  const mode=!st||!st.playing?"play":loop.armed?"stop":"join";
+  goEl.dataset.mode=mode;goEl.textContent=mode==="play"?"Play":mode==="stop"?"Stop":"Join";
+  if(t)bpmOut.textContent=t.tempo+" bpm";
+  posEl.dataset.s=st&&st.playing?"live":"off";
+  if(!st||!st.playing){lastPos="";posEl.textContent="stopped"}
+  grooveBox.querySelectorAll("button").forEach(b=>{b.disabled=!st;b.setAttribute("aria-pressed",!!t&&b.dataset.g===t.groove)});
+}
+function buildGrooves(names){
+  if(grooveBox.dataset.names===names.join("|"))return;
+  grooveBox.dataset.names=names.join("|");grooveBox.textContent="";
+  names.forEach(name=>{const b=document.createElement("button");b.className="chip";b.dataset.g=name;b.textContent=name;
+    b.addEventListener("click",()=>sync.send("transport",{action:"groove",groove:name}));grooveBox.appendChild(b)});
+}
+sync.on("pong",m=>clock.pong(m));
+sync.on("loop",m=>{if(Array.isArray(m.grooves))buildGrooves(m.grooves.map(String));loop.setState(m.state);renderLoop()});
+goEl.addEventListener("click",()=>{
+  const st=loop.state;if(!st)return;
+  initAudio();
+  if(!st.playing){loop.arm(true);sync.send("transport",{action:"start"})}
+  else if(!loop.armed)loop.arm(true);
+  else sync.send("transport",{action:"stop"});
+  renderLoop();
+});
+const bumpTempo=d=>{const t=target();if(t)sync.send("transport",{action:"tempo",tempo:Math.min(200,Math.max(50,t.tempo+d))})};
+document.getElementById("bpmDn").addEventListener("click",()=>bumpTempo(-4));
+document.getElementById("bpmUp").addEventListener("click",()=>bumpTempo(4));
+/* The part this phone plays and its timing trim belong to the phone, so they are not synced. */
+function setSlot(id){loop.setSlot(id);keep(APP+"-slot",id);document.querySelectorAll("#slots button").forEach(b=>b.setAttribute("aria-pressed",b.dataset.s===id))}
+document.querySelectorAll("#slots button").forEach(b=>b.addEventListener("click",()=>setSlot(b.dataset.s)));
+setSlot(["all","drums","bass","lead","pad"].indexOf(keep(APP+"-slot"))<0?"all":keep(APP+"-slot"));
+function setNudge(ms){ms=Math.min(300,Math.max(-300,Math.round(ms)||0));loop.setNudge(ms);keep(APP+"-nudge",String(ms));nudgeOut.textContent=(ms>0?"+":"")+ms+" ms"}
+document.getElementById("nudgeDn").addEventListener("click",()=>setNudge(loop.nudge-5));
+document.getElementById("nudgeUp").addEventListener("click",()=>setNudge(loop.nudge+5));
+setNudge(+keep(APP+"-nudge"));
+renderLoop();
 roomEl.value=sync.room;
 roomEl.addEventListener("change",()=>{roomEl.value=sync.setRoom(roomEl.value)});
 roomEl.addEventListener("keydown",e=>{e.stopPropagation();if(e.key==="Enter")roomEl.blur()});
 roomEl.addEventListener("keyup",e=>e.stopPropagation());
 sync.connect();
-window.StompboxLab={exportState:exportState,loadState:loadState,change:change,sync:sync};
+window.StompboxLab={exportState:exportState,loadState:loadState,change:change,sync:sync,clock:clock,loop:loop};
 
 /* ---------- keyboard ---------- */
 const keysEl=document.getElementById("keys"),octOut=document.getElementById("octOut"),volEl=document.getElementById("vol");

@@ -1,0 +1,17 @@
+{
+  "name": "stompbox-lab-backend",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Stompbox Lab sync and loop server",
+  "main": "stompbox-lab-v2-server.js",
+  "scripts": {
+    "start": "node stompbox-lab-v2-server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ioredis": "^5.4.1",
+    "ws": "^8.18.0"
+  }
+}

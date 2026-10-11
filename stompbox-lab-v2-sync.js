@@ -1,4 +1,4 @@
-/* stompbox-lab-v1-sync.js
+/* stompbox-lab-v2-sync.js
    Board sync client. Shared by every app that syncs a board between phones.
    The app supplies exportState, loadState and applyChange. This file owns the
    device id, the room code, the socket and the message format.
@@ -16,7 +16,10 @@
      path    change only, for example "wah.sweep" or "patch"
      value   change only, the new value at that path
      state   snapshot only, the whole board from exportState
-   A "request" asks this phone to answer with a snapshot of its board. */
+   A "request" asks this phone to answer with a snapshot of its board.
+
+   ORANGE PHONE: v2 adds on() and send() so other modules share this one socket.
+   The clock uses "ping" and "pong". The loop uses "transport" and "loop". */
 (function(){
 "use strict";
 
@@ -43,6 +46,7 @@ window.createBoardSync=function(o){
   let room=cleanRoom(store(app+"-room"));
   let ws=null,retry=0,retryTimer=null,flushTimer=null,seq=0,status="off";
   const pending=new Map();
+  const handlers={};
 
   function setStatus(s){status=s;if(o.onStatus)o.onStatus(s,room)}
   function envelope(type,extra){return Object.assign({type:type,app:app,schema:schema,room:room,device:device,seq:++seq,ts:Date.now()},extra)}
@@ -51,6 +55,7 @@ window.createBoardSync=function(o){
   function receive(text){
     let m;try{m=JSON.parse(text)}catch(e){return}
     if(!m||m.app!==app)return;
+    if(handlers[m.type]){handlers[m.type](m);return}
     if(m.schema!==schema){setStatus("update needed");return}
     if(m.type==="snapshot"&&m.state)o.loadState(m.state);
     else if(m.type==="change"&&m.device!==device)o.applyChange(m.path,m.value);
@@ -91,6 +96,10 @@ window.createBoardSync=function(o){
     },
     /* The app calls this after a change that touches the whole board, such as a preset. */
     snapshot:function(){if(url)send(envelope("snapshot",{state:o.exportState()}))},
+    /* Another module listens for one message type from the server. */
+    on:function(type,fn){handlers[type]=fn},
+    /* Another module sends its own message type over the same socket. */
+    send:function(type,extra){return send(envelope(type,extra))},
     setRoom:function(r){room=cleanRoom(r);store(app+"-room",room);connect();return room},
     connect:connect,
     get room(){return room},
