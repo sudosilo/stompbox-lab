@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <script>try{if(localStorage.getItem("stompbox-lab-theme")==="dark")document.documentElement.dataset.theme="dark"}catch(e){}</script>
-<title>Stompbox Lab v3</title>
+<title>Stompbox Lab v4</title>
 <style>
 /* Layout: a pedalboard on a stage. Header rack strip, grid of stompboxes, keyboard pinned to the bottom edge. Light and dark themes, chosen with the Theme switch. */
 :root{
@@ -118,7 +118,7 @@ button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid v
 <div class="app">
   <header class="wrap">
     <div class="toprow">
-      <h1>Stompbox Lab<small>V3</small></h1>
+      <h1>Stompbox Lab<small>V4</small></h1>
       <div class="scope"><canvas id="scope"></canvas></div>
     </div>
     <div class="rack">
@@ -144,6 +144,7 @@ button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid v
       <span class="label">Board</span>
       <input class="room" id="room" type="text" inputmode="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="24" placeholder="room code" aria-label="Room code">
       <span class="status" id="syncStatus" data-s="off">Sync off</span>
+      <span class="status" id="seatVoice" data-s="live" hidden></span>
     </div>
     <div class="rack" id="playerRack" hidden>
       <span class="label">Player</span>
@@ -201,7 +202,7 @@ button:focus-visible,.knob:focus-visible,input:focus-visible{outline:2px solid v
 <script src="stompbox-lab-v3-auth.js"></script>
 <script src="stompbox-lab-v3-sync.js"></script>
 <script src="stompbox-lab-v2-clock.js"></script>
-<script src="stompbox-lab-v2-loop.js"></script>
+<script src="stompbox-lab-v3-loop.js"></script>
 <script>
 /* ---------- sync settings ---------- */
 /* SYNC_URL is the backend address, read from stompbox-lab-v3-config.js. While it is blank, sync is off and the app runs on this phone alone.
@@ -322,7 +323,7 @@ function writePath(path,value){
 }
 function change(path,value,remote){
   if(!writePath(path,value))return;
-  if(!remote)sync.change(path, path==="patch" ? patch : S[path.split(".")[0]][path.split(".")[1]]);
+  /* ORANGE PHONE: v4 knobs, switches and sounds stay on this phone. Nothing about the board is sent to other phones. */
 }
 /* The whole board as one JSON snapshot. Volume and octave belong to the phone and are left out. */
 function exportState(){
@@ -381,7 +382,7 @@ function applyPreset(cfg){
   const snap=exportState();
   PEDALS.forEach(p=>{const c=cfg[p.id]||{};Object.assign(snap.pedals[p.id],c);snap.pedals[p.id].on=!!c.on});
   snap.patch=cfg.patch;
-  loadState(snap);sync.snapshot();
+  loadState(snap);
 }
 const presetBox=document.getElementById("presets");
 Object.entries(PRESETS).forEach(([name,cfg])=>{const b=document.createElement("button");b.className="chip";b.textContent=name;
@@ -409,8 +410,9 @@ const sync=createBoardSync({
   app:APP,schema:SCHEMA,url:SYNC_URL,
   ready:()=>!auth.on||!!auth.token,
   onOpen:()=>{if(auth.on)sync.send("auth",{token:auth.token})},
-  exportState:exportState,loadState:loadState,
-  applyChange:(path,value)=>change(path,value,true),
+  /* ORANGE PHONE: v4 the board belongs to this phone, so the shared socket carries no board state in or out. */
+  exportState:()=>null,loadState:()=>false,
+  applyChange:()=>{},
   onStatus:s=>{
     statusEl.dataset.s=s;statusEl.textContent= s==="off" ? "Sync off" : s;
     if(s==="live"){clock.start();beat()}else{clock.stop();loop.setState(null);renderLoop()}
@@ -423,7 +425,7 @@ const grooveBox=document.getElementById("grooves"),nudgeOut=document.getElementB
 function keep(key,value){try{if(value===undefined)return localStorage.getItem(key);localStorage.setItem(key,value)}catch(e){}return null}
 let lastPos="";
 const loop=createLoop({
-  clock:clock,ctx:()=>ctx,chain:()=>chainIn,bus:()=>loopBus,patches:PATCH,patch:()=>patch,
+  clock:clock,ctx:()=>ctx,chain:()=>chainIn,bus:()=>loopBus,patches:PATCH,patch:()=>patch,voice:()=>voice,
   onPos:(bar,beat)=>{const text="bar "+(bar+1)+"."+(beat+1);if(text!==lastPos){lastPos=text;posEl.textContent=text}},
 });
 /* The tempo and groove on screen are the ones the room is heading to, so a queued change shows at once. */
@@ -508,6 +510,39 @@ roomEl.addEventListener("change",()=>{roomEl.value=sync.setRoom(roomEl.value)});
 roomEl.addEventListener("keydown",e=>{e.stopPropagation();if(e.key==="Enter")roomEl.blur()});
 roomEl.addEventListener("keyup",e=>e.stopPropagation());
 sync.connect();
+/* ---------- seat voices ----------
+   ORANGE PHONE: v4 the server gives every pedal phone in a room its own seat number. Each seat gets its own voice:
+   a sound, a pedal preset, a keyboard octave, a drum kit and a bass wave. Two phones on this one app sound
+   different from each other without a second app. Past the last voice the list starts over an octave higher.
+   Knobs and switches still turn freely on each phone after the voice is set. */
+const SEAT_VOICES=[
+  {name:"Clean Pluck", patch:"pluck", preset:"Clean",      octave:0,   bassWave:"sawtooth",
+   kit:{kick:150,kickEnd:45,kickDecay:.3, snare:1400,snareBody:200,hat:7500,clap:1500}},
+  {name:"Fuzz Lead",   patch:"lead",  preset:"Grunge",     octave:0,   bassWave:"square",
+   kit:{kick:120,kickEnd:38,kickDecay:.4, snare:1000,snareBody:170,hat:6500,clap:1100}},
+  {name:"Surf Organ",  patch:"organ", preset:"Surf",       octave:12,  bassWave:"triangle",
+   kit:{kick:180,kickEnd:55,kickDecay:.22,snare:2200,snareBody:240,hat:9000,clap:2000}},
+  {name:"Space Lead",  patch:"lead",  preset:"Outer Space",octave:12,  bassWave:"sine",
+   kit:{kick:140,kickEnd:42,kickDecay:.5, snare:1800,snareBody:220,hat:8000,clap:1700}},
+  {name:"Funk Wah",    patch:"pluck", preset:"Funk Wah",   octave:-12, bassWave:"square",
+   kit:{kick:160,kickEnd:50,kickDecay:.25,snare:1600,snareBody:260,hat:8500,clap:1300}},
+  {name:"Deep Organ",  patch:"organ", preset:"Outer Space",octave:-12, bassWave:"sawtooth",
+   kit:{kick:110,kickEnd:35,kickDecay:.45,snare:900, snareBody:150,hat:6000,clap:900}},
+];
+let voice={octave:0,bassWave:"sawtooth",kit:null},seat=-1;
+const seatEl=document.getElementById("seatVoice");
+function applySeat(n){
+  if(typeof n!=="number"||n<0||n===seat)return;
+  seat=n;
+  const v=SEAT_VOICES[n%SEAT_VOICES.length],lift=12*Math.floor(n/SEAT_VOICES.length);
+  voice={octave:v.octave+lift,bassWave:v.bassWave,kit:v.kit};
+  if(PRESETS[v.preset])applyPreset(PRESETS[v.preset]);
+  change("patch",v.patch);
+  base=Math.min(84,Math.max(24,48+v.octave+lift));buildKeys();
+  seatEl.hidden=false;seatEl.textContent="seat "+(n+1)+", "+v.name+(lift?" up "+(lift/12)+" oct":"");
+}
+sync.on("seat",m=>applySeat(m.seat));
+
 window.StompboxLab={exportState:exportState,loadState:loadState,change:change,sync:sync,clock:clock,loop:loop};
 
 /* ---------- keyboard ---------- */

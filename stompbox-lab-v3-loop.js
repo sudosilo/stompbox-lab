@@ -1,4 +1,4 @@
-/* stompbox-lab-v2-loop.js
+/* stompbox-lab-v3-loop.js
    Loop engine for phones. Parses patterns, counts bars from the server clock, and
    schedules notes with Web Audio. The server only sends data, never code.
 
@@ -13,7 +13,10 @@
      <c2 e2>         one choice per bar, taking turns
      a, b            layers that play at the same time
    Drum names: bd sd hh oh cp ck cl. Notes: c2, eb3, f#4, or a MIDI number.
-   Every parsed step holds note, vel and pos, the same fields MIDI uses. */
+   Every parsed step holds note, vel and pos, the same fields MIDI uses.
+
+   ORANGE PHONE: v3 voices. o.voice() hands the engine this phone's voice: a drum kit, a bass wave and an
+   octave shift for lead and pad, so phones on the same app sound different from each other. */
 (function(){
 "use strict";
 
@@ -130,19 +133,20 @@ window.createLoop=function(o){
     src.connect(f);f.connect(g);g.connect(dest);
     src.start(at,Math.random()*.5);src.stop(at+decay+.02);
   }
+  const KIT0={kick:150,kickEnd:45,kickDecay:.3,snare:1400,snareBody:200,hat:7500,clap:1500};
   function drum(ctx,dest,name,at,vel){
-    const v=vel/100;
-    if(name==="bd")hit(ctx,dest,at,150,45,.11,.95*v,.3);
-    else if(name==="sd"){hiss(ctx,dest,at,"highpass",1400,.7,.5*v,.17);hit(ctx,dest,at,200,160,.05,.35*v,.09,"triangle")}
-    else if(name==="hh")hiss(ctx,dest,at,"highpass",7500,.7,.22*v,.045);
-    else if(name==="oh")hiss(ctx,dest,at,"highpass",6500,.7,.22*v,.24);
-    else if(name==="cp")hiss(ctx,dest,at,"bandpass",1500,1.2,.6*v,.13);
+    const v=vel/100,k=(o.voice&&o.voice().kit)||KIT0;
+    if(name==="bd")hit(ctx,dest,at,k.kick,k.kickEnd,.11,.95*v,k.kickDecay);
+    else if(name==="sd"){hiss(ctx,dest,at,"highpass",k.snare,.7,.5*v,.17);hit(ctx,dest,at,k.snareBody,k.snareBody*.8,.05,.35*v,.09,"triangle")}
+    else if(name==="hh")hiss(ctx,dest,at,"highpass",k.hat,.7,.22*v,.045);
+    else if(name==="oh")hiss(ctx,dest,at,"highpass",k.hat-1000,.7,.22*v,.24);
+    else if(name==="cp")hiss(ctx,dest,at,"bandpass",k.clap,1.2,.6*v,.13);
     else if(name==="ck")hit(ctx,dest,at,1600,1600,0,.4*v,.04);
     else if(name==="cl")hit(ctx,dest,at,1000,1000,0,.28*v,.04);
   }
   function bass(ctx,dest,m,at,len,vel){
     const osc=ctx.createOscillator(),f=ctx.createBiquadFilter(),g=ctx.createGain(),end=at+len;
-    osc.type="sawtooth";osc.frequency.value=hz(m);
+    osc.type=(o.voice&&o.voice().bassWave)||"sawtooth";osc.frequency.value=hz(m);
     f.type="lowpass";f.Q.value=3;f.frequency.setValueAtTime(900,at);f.frequency.setTargetAtTime(260,at,.09);
     g.gain.setValueAtTime(0,at);g.gain.linearRampToValueAtTime(.42*vel/100,at+.006);
     g.gain.setTargetAtTime(0,end,.03);
@@ -178,8 +182,8 @@ window.createLoop=function(o){
     if(id==="drums"){if(ev.drum)drum(ctx,o.bus(),ev.drum,at,ev.vel)}
     else if(ev.drum)return;
     else if(id==="bass")bass(ctx,o.bus(),ev.note,at,len*.9,ev.vel);
-    else if(id==="lead")lead(ctx,o.chain(),ev.note,at,len*.85,ev.vel);
-    else if(id==="pad")pad(ctx,o.chain(),ev.note,at,len,ev.vel);
+    else if(id==="lead")lead(ctx,o.chain(),ev.note+((o.voice&&o.voice().octave)||0),at,len*.85,ev.vel);
+    else if(id==="pad")pad(ctx,o.chain(),ev.note+((o.voice&&o.voice().octave)||0),at,len,ev.vel);
   }
 
   /* Runs many times a second. Schedules every step that begins inside the next short window. */

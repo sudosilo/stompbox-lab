@@ -1,4 +1,4 @@
-/* stompbox-lab-v4-server.js
+/* stompbox-lab-v5-server.js
    Stompbox Lab sync and loop server. Runs on Railway from the backend folder.
 
    ORANGE PHONE: stage one, WebSocket rooms, board relay, server clock pings.
@@ -7,6 +7,9 @@
    ORANGE PHONE: v4, one room holds every app. The loop, the clock and the heartbeats are shared by all
    phones that typed the same room code, whatever app they run. Board messages only travel between
    phones running the same app, and each app has its own stored board inside the room.
+   ORANGE PHONE: v5 seats. Every phone gets a seat number among the phones of its own app in its room,
+   the lowest number not taken. A phone keeps its seat until it leaves. Apps use the seat to pick a
+   different voice for each phone. server sends {type:"seat", seat, count}
 
    One WebSocket per phone. The address carries app, room and device in the query string.
    Every message is one JSON object with a type field.
@@ -195,6 +198,19 @@ async function getBoard(room, app) {
   return room.boards[app];
 }
 function sendTo(ws, msg) { if (ws.readyState === 1) ws.send(JSON.stringify(msg)) }
+/* Hands out the lowest free seat to a phone, then tells every phone of that app its seat and how many share the app. */
+function seatUp(room, app) {
+  const peers = [];
+  room.sockets.forEach(ws => { if (ws.app === app) peers.push(ws); });
+  const taken = new Set(peers.filter(ws => typeof ws.seat === "number").map(ws => ws.seat));
+  peers.forEach(ws => {
+    if (typeof ws.seat === "number") return;
+    let n = 0; while (taken.has(n)) n++;
+    ws.seat = n; taken.add(n);
+  });
+  peers.forEach(ws => sendTo(ws, { type: "seat", app: app, seat: ws.seat, count: peers.length }));
+}
+
 /* Board messages go to the other phones running the same app. */
 function relay(room, msg, from) {
   const text = JSON.stringify(msg);
@@ -329,7 +345,7 @@ const server = http.createServer((req, res) => {
   if (req.url === "/health") {
     let phones = 0; rooms.forEach(r => { phones += r.sockets.size });
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, version: 4, rooms: rooms.size, phones: phones, redis: redis ? redis.status : "off", login: AUTH_ON ? "on" : "off" }));
+    res.end(JSON.stringify({ ok: true, version: 5, rooms: rooms.size, phones: phones, redis: redis ? redis.status : "off", login: AUTH_ON ? "on" : "off" }));
     return;
   }
   res.writeHead(200, { "content-type": "text/plain" });
@@ -363,10 +379,12 @@ wss.on("connection", async (ws, req) => {
     early.forEach(text => onMessage(room, ws, text));
     early.length = 0;
     welcome(room, ws);
+    seatUp(room, app);
   }
   ws.on("close", () => {
     if (!room) return;
     room.sockets.delete(ws);
+    seatUp(room, ws.app);
     if (!room.sockets.size) {
       Object.keys(room.boardTimers).forEach(a => {
         if (room.boardTimers[a]) { clearTimeout(room.boardTimers[a]); room.boardTimers[a] = null; save("board:" + a + ":" + room.id, room.boards[a]) }
