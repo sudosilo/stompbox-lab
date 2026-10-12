@@ -1,9 +1,12 @@
-/* stompbox-lab-v3-server.js
+/* stompbox-lab-v4-server.js
    Stompbox Lab sync and loop server. Runs on Railway from the backend folder.
 
    ORANGE PHONE: stage one, WebSocket rooms, board relay, server clock pings.
    ORANGE PHONE: stage two, loop state in Redis, hand written grooves, bar line changes.
    ORANGE PHONE: stage three, Supabase login check, player heartbeats, heartbeat gate on the loop.
+   ORANGE PHONE: v4, one room holds every app. The loop, the clock and the heartbeats are shared by all
+   phones that typed the same room code, whatever app they run. Board messages only travel between
+   phones running the same app, and each app has its own stored board inside the room.
 
    One WebSocket per phone. The address carries app, room and device in the query string.
    Every message is one JSON object with a type field.
@@ -166,33 +169,53 @@ function validLoop(s) {
 
 /* ---------- rooms ---------- */
 const rooms = new Map();
-async function getRoom(app, name) {
-  const id = app + ":" + name;
-  let room = rooms.get(id);
+async function getRoom(name) {
+  let room = rooms.get(name);
   if (!room) {
-    room = { id: id, app: app, sockets: new Set(), loop: newLoop(), board: { snap: null, changes: {} }, boardTimer: null, beats: new Map(), lastStart: Date.now() };
-    rooms.set(id, room);
+    room = { id: name, sockets: new Set(), loop: newLoop(), boards: {}, boardReady: {}, boardTimers: {}, beats: new Map(), lastStart: Date.now() };
+    rooms.set(name, room);
     room.ready = (async () => {
-      const [loop, board] = await Promise.all([load("loop:" + id), load("board:" + id)]);
+      const loop = await load("loop:" + name);
       if (validLoop(loop)) room.loop = loop;
-      if (board && typeof board === "object") room.board = { snap: board.snap || null, changes: board.changes || {} };
     })();
   }
   await room.ready;
   return room;
 }
+/* The stored board of one app inside a room, loaded from Redis the first time a phone of that app joins. */
+async function getBoard(room, app) {
+  if (!room.boardReady[app]) {
+    room.boards[app] = { snap: null, changes: {} };
+    room.boardReady[app] = (async () => {
+      const board = await load("board:" + app + ":" + room.id);
+      if (board && typeof board === "object") room.boards[app] = { snap: board.snap || null, changes: board.changes || {} };
+    })();
+  }
+  await room.boardReady[app];
+  return room.boards[app];
+}
 function sendTo(ws, msg) { if (ws.readyState === 1) ws.send(JSON.stringify(msg)) }
-function broadcast(room, msg, except) {
+/* Board messages go to the other phones running the same app. */
+function relay(room, msg, from) {
   const text = JSON.stringify(msg);
-  room.sockets.forEach(ws => { if (ws !== except && ws.readyState === 1) ws.send(text) });
+  room.sockets.forEach(ws => { if (ws !== from && ws.app === from.app && ws.readyState === 1) ws.send(text) });
 }
-function loopMessage(room) {
+function loopMessage(room, app) {
   fold(room.loop, Date.now());
-  return { type: "loop", app: room.app, state: room.loop, grooves: Object.keys(GROOVES), now: Date.now(), auth: AUTH_ON, players: room.beats.size };
+  return { type: "loop", app: app, state: room.loop, grooves: Object.keys(GROOVES), now: Date.now(), auth: AUTH_ON, players: room.beats.size, phones: room.sockets.size };
 }
-function saveBoardSoon(room) {
-  if (room.boardTimer) return;
-  room.boardTimer = setTimeout(() => { room.boardTimer = null; save("board:" + room.id, room.board) }, 1000);
+/* The loop goes to every phone in the room. Each phone gets the message stamped with its own app name. */
+function broadcastLoop(room) {
+  const texts = {};
+  room.sockets.forEach(ws => {
+    if (ws.readyState !== 1) return;
+    if (!texts[ws.app]) texts[ws.app] = JSON.stringify(loopMessage(room, ws.app));
+    ws.send(texts[ws.app]);
+  });
+}
+function saveBoardSoon(room, app) {
+  if (room.boardTimers[app]) return;
+  room.boardTimers[app] = setTimeout(() => { room.boardTimers[app] = null; save("board:" + app + ":" + room.id, room.boards[app]) }, 1000);
 }
 
 /* ---------- heartbeat gate ---------- */
@@ -208,14 +231,14 @@ function beat(room, ws) {
   if (redis) redis.set(PREFIX + "beat:" + room.id + ":" + id, "1", "EX", BEAT_SECONDS).catch(() => {});
   if (room.loop.idle && !room.loop.playing) {
     startLoop(room, now);
-    save("loop:" + room.id, room.loop); broadcast(room, loopMessage(room));
+    save("loop:" + room.id, room.loop); broadcastLoop(room);
   }
 }
 function gate(room, now) {
   room.beats.forEach((t, id) => { if (now - t > BEAT_SECONDS * 1000) room.beats.delete(id) });
   if (room.loop.playing && !room.beats.size && now - room.lastStart > START_GRACE_MS) {
     room.loop.playing = false; room.loop.pending = null; room.loop.idle = true;
-    save("loop:" + room.id, room.loop); broadcast(room, loopMessage(room));
+    save("loop:" + room.id, room.loop); broadcastLoop(room);
     console.log("gate: no active player, loop stopped in " + room.id);
   }
 }
@@ -260,39 +283,40 @@ function onMessage(room, ws, text) {
   let m; try { m = JSON.parse(text) } catch (e) { return }
   if (!m || typeof m !== "object" || typeof m.type !== "string") return;
   if (typeof m.schema === "number") ws.schema = m.schema;
-  m.app = room.app; m.device = ws.device;
+  m.app = ws.app; m.device = ws.device;
+  const board = room.boards[ws.app];
 
   if (m.type === "beat") { beat(room, ws); return }
   if (m.type === "transport") {
-    if (transport(room, m)) { save("loop:" + room.id, room.loop); broadcast(room, loopMessage(room)) }
+    if (transport(room, m)) { save("loop:" + room.id, room.loop); broadcastLoop(room) }
     return;
   }
-  if (m.type === "hello") { broadcast(room, m, ws); return }
+  if (m.type === "hello") { relay(room, m, ws); return }
   if (m.type === "change") {
     if (typeof m.path !== "string" || m.path.length > 64) return;
-    if (m.path in room.board.changes || Object.keys(room.board.changes).length < MAX_BOARD_PATHS) room.board.changes[m.path] = m.value;
-    saveBoardSoon(room); broadcast(room, m, ws); return;
+    if (m.path in board.changes || Object.keys(board.changes).length < MAX_BOARD_PATHS) board.changes[m.path] = m.value;
+    saveBoardSoon(room, ws.app); relay(room, m, ws); return;
   }
   if (m.type === "snapshot") {
     if (!m.state || typeof m.state !== "object") return;
-    room.board = { snap: m, changes: {} };
-    saveBoardSoon(room); broadcast(room, m, ws); return;
+    room.boards[ws.app] = { snap: m, changes: {} };
+    saveBoardSoon(room, ws.app); relay(room, m, ws); return;
   }
-  if (m.type === "request") { broadcast(room, m, ws); return }
+  if (m.type === "request") { relay(room, m, ws); return }
 }
 
 /* A phone that joins gets the loop first, then the board the room already holds. */
 function welcome(room, ws) {
-  sendTo(ws, loopMessage(room));
-  const b = room.board;
+  sendTo(ws, loopMessage(room, ws.app));
+  const b = room.boards[ws.app];
   if (b.snap) {
     sendTo(ws, b.snap);
-    Object.keys(b.changes).forEach(path => sendTo(ws, { type: "change", app: room.app, schema: b.snap.schema, room: b.snap.room, device: "server", seq: 0, ts: Date.now(), path: path, value: b.changes[path] }));
+    Object.keys(b.changes).forEach(path => sendTo(ws, { type: "change", app: ws.app, schema: b.snap.schema, room: b.snap.room, device: "server", seq: 0, ts: Date.now(), path: path, value: b.changes[path] }));
     return;
   }
   for (const other of room.sockets) {
-    if (other !== ws && other.readyState === 1 && typeof other.schema === "number") {
-      sendTo(other, { type: "request", app: room.app, schema: other.schema, device: "server", seq: 0, ts: Date.now() });
+    if (other !== ws && other.app === ws.app && other.readyState === 1 && typeof other.schema === "number") {
+      sendTo(other, { type: "request", app: ws.app, schema: other.schema, device: "server", seq: 0, ts: Date.now() });
       return;
     }
   }
@@ -305,7 +329,7 @@ const server = http.createServer((req, res) => {
   if (req.url === "/health") {
     let phones = 0; rooms.forEach(r => { phones += r.sockets.size });
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, version: 3, rooms: rooms.size, phones: phones, redis: redis ? redis.status : "off", login: AUTH_ON ? "on" : "off" }));
+    res.end(JSON.stringify({ ok: true, version: 4, rooms: rooms.size, phones: phones, redis: redis ? redis.status : "off", login: AUTH_ON ? "on" : "off" }));
     return;
   }
   res.writeHead(200, { "content-type": "text/plain" });
@@ -321,6 +345,7 @@ wss.on("connection", async (ws, req) => {
   const app = clean(q.get("app"), 32, /[^a-z0-9-]/g);
   const name = clean(q.get("room"), 24, /[^a-z0-9]/g);
   ws.device = clean(q.get("device"), 64, /[^a-z0-9-]/g);
+  ws.app = app;
   if (!app || !name || !ws.device) { ws.close(1008, "app, room and device are required"); return }
 
   /* ORANGE PHONE: a phone enters its room at once while login is off, or after its token checks out while login is on.
@@ -329,7 +354,8 @@ wss.on("connection", async (ws, req) => {
   async function enter() {
     if (room || entering) return;
     entering = true;
-    const loaded = await getRoom(app, name);
+    const loaded = await getRoom(name);
+    await getBoard(loaded, app);
     if (ws.readyState !== 1) return;
     if (loaded.sockets.size >= MAX_PHONES_PER_ROOM) { ws.close(1013, "room full"); return }
     loaded.sockets.add(ws);
@@ -342,7 +368,9 @@ wss.on("connection", async (ws, req) => {
     if (!room) return;
     room.sockets.delete(ws);
     if (!room.sockets.size) {
-      if (room.boardTimer) { clearTimeout(room.boardTimer); room.boardTimer = null; save("board:" + room.id, room.board) }
+      Object.keys(room.boardTimers).forEach(a => {
+        if (room.boardTimers[a]) { clearTimeout(room.boardTimers[a]); room.boardTimers[a] = null; save("board:" + a + ":" + room.id, room.boards[a]) }
+      });
       if (redis && !room.loop.playing) rooms.delete(room.id);
     }
   });

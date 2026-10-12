@@ -1,11 +1,11 @@
 {
   "name": "stompbox-lab-backend",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "private": true,
   "description": "Stompbox Lab sync and loop server",
-  "main": "stompbox-lab-v3-server.js",
+  "main": "stompbox-lab-v4-server.js",
   "scripts": {
-    "start": "node stompbox-lab-v3-server.js"
+    "start": "node stompbox-lab-v4-server.js"
   },
   "engines": {
     "node": ">=20"
