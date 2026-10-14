@@ -277,7 +277,7 @@ function initAudio(){
   PEDALS.forEach(p=>{const n=BUILD[p.id]();N[p.id]=n;prev.connect(n.in);prev=n.out});
   const comp=ctx.createDynamicsCompressor();comp.threshold.value=-14;comp.ratio.value=4;
   master=ctx.createGain();master.gain.value=+volEl.value;analyser=ctx.createAnalyser();analyser.fftSize=1024;
-  /* ORANGE PHONE: loop drums and bass enter after the pedals, loop lead and pad enter chainIn. */
+  /* BLUE PHONE: loop drums and bass enter after the pedals, loop lead and pad enter chainIn. */
   loopBus=ctx.createGain();loopBus.connect(comp);
   prev.connect(comp);comp.connect(master);master.connect(analyser);analyser.connect(ctx.destination);
   PEDALS.forEach(p=>apply(p.id));
@@ -323,7 +323,7 @@ function writePath(path,value){
 }
 function change(path,value,remote){
   if(!writePath(path,value))return;
-  /* ORANGE PHONE: v4 knobs, switches and sounds stay on this phone. Nothing about the board is sent to other phones. */
+  /* BLUE PHONE: v4 knobs, switches and sounds stay on this phone. Nothing about the board is sent to other phones. */
 }
 /* The whole board as one JSON snapshot. Volume and octave belong to the phone and are left out. */
 function exportState(){
@@ -391,7 +391,7 @@ Object.entries(PRESETS).forEach(([name,cfg])=>{const b=document.createElement("b
 
 /* ---------- sync wiring ---------- */
 const roomEl=document.getElementById("room"),statusEl=document.getElementById("syncStatus");
-/* ORANGE PHONE: the clock and the loop share the sync socket. */
+/* BLUE PHONE: the clock and the loop share the sync socket. */
 const clockStat=document.getElementById("clockStat");
 const clock=createServerClock({
   send:m=>sync.send(m.type,m),
@@ -400,7 +400,7 @@ const clock=createServerClock({
     clockStat.textContent=clock.synced?"clock locked, trip "+Math.round(rtt)+" ms":"clock off";
   },
 });
-/* ORANGE PHONE: added Supabase login. While the Supabase values are missing, login is off and the room is open. */
+/* BLUE PHONE: added Supabase login. While the Supabase values are missing, login is off and the room is open. */
 const SUPA=window.STOMPBOX_LAB_SUPABASE||{};
 const auth=createAuth({app:APP,url:SUPA.url||"",key:SUPA.key||"",onChange:()=>{
   renderAuth();
@@ -410,7 +410,7 @@ const sync=createBoardSync({
   app:APP,schema:SCHEMA,url:SYNC_URL,
   ready:()=>!auth.on||!!auth.token,
   onOpen:()=>{if(auth.on)sync.send("auth",{token:auth.token})},
-  /* ORANGE PHONE: v4 the board belongs to this phone, so the shared socket carries no board state in or out. */
+  /* BLUE PHONE: v4 the board belongs to this phone, so the shared socket carries no board state in or out. */
   exportState:()=>null,loadState:()=>false,
   applyChange:()=>{},
   onStatus:s=>{
@@ -459,7 +459,7 @@ goEl.addEventListener("click",()=>{
 const bumpTempo=d=>{const t=target();if(t)sync.send("transport",{action:"tempo",tempo:Math.min(200,Math.max(50,t.tempo+d))})};
 document.getElementById("bpmDn").addEventListener("click",()=>bumpTempo(-4));
 document.getElementById("bpmUp").addEventListener("click",()=>bumpTempo(4));
-/* ORANGE PHONE: added heartbeat. A phone that is playing and on screen tells the server every 10 seconds.
+/* BLUE PHONE: added heartbeat. A phone that is playing and on screen tells the server every 10 seconds.
    The server stops the loop when no phone has done so for 20 seconds. */
 function beat(){if(loop.armed&&sync.status==="live"&&document.visibilityState==="visible")sync.send("beat")}
 setInterval(beat,10000);
@@ -511,7 +511,7 @@ roomEl.addEventListener("keydown",e=>{e.stopPropagation();if(e.key==="Enter")roo
 roomEl.addEventListener("keyup",e=>e.stopPropagation());
 sync.connect();
 /* ---------- seat voices ----------
-   ORANGE PHONE: v4 the server gives every pedal phone in a room its own seat number. Each seat gets its own voice:
+   BLUE PHONE: v4 the server gives every pedal phone in a room its own seat number. Each seat gets its own voice:
    a sound, a pedal preset, a keyboard octave, a drum kit and a bass wave. Two phones on this one app sound
    different from each other without a second app. Past the last voice the list starts over an octave higher.
    Knobs and switches still turn freely on each phone after the voice is set. */

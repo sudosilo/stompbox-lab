@@ -1,7 +1,7 @@
 /* stompbox-lab-v3-auth.js
    Supabase login for phones. Shared by every app that signs players in.
 
-   ORANGE PHONE: stage three, email and password login, token refresh.
+   BLUE PHONE: stage three, email and password login, token refresh.
 
    Talks to the Supabase auth address directly with fetch. The key used here is the
    public one that is safe inside a web page. The session is stored on the phone.

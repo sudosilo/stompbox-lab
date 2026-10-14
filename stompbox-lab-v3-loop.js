@@ -2,7 +2,7 @@
    Loop engine for phones. Parses patterns, counts bars from the server clock, and
    schedules notes with Web Audio. The server only sends data, never code.
 
-   ORANGE PHONE: stage two, pattern parser, bar timeline, scheduler, slot voices.
+   BLUE PHONE: stage two, pattern parser, bar timeline, scheduler, slot voices.
 
    Pattern notation, one bar per cycle:
      bd sd hh        steps share the bar evenly
@@ -15,7 +15,7 @@
    Drum names: bd sd hh oh cp ck cl. Notes: c2, eb3, f#4, or a MIDI number.
    Every parsed step holds note, vel and pos, the same fields MIDI uses.
 
-   ORANGE PHONE: v3 voices. o.voice() hands the engine this phone's voice: a drum kit, a bass wave and an
+   BLUE PHONE: v3 voices. o.voice() hands the engine this phone's voice: a drum kit, a bass wave and an
    octave shift for lead and pad, so phones on the same app sound different from each other. */
 (function(){
 "use strict";

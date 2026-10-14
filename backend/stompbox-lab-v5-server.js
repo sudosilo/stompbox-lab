@@ -1,13 +1,13 @@
 /* stompbox-lab-v5-server.js
    Stompbox Lab sync and loop server. Runs on Railway from the backend folder.
 
-   ORANGE PHONE: stage one, WebSocket rooms, board relay, server clock pings.
-   ORANGE PHONE: stage two, loop state in Redis, hand written grooves, bar line changes.
-   ORANGE PHONE: stage three, Supabase login check, player heartbeats, heartbeat gate on the loop.
-   ORANGE PHONE: v4, one room holds every app. The loop, the clock and the heartbeats are shared by all
+   BLUE PHONE: stage one, WebSocket rooms, board relay, server clock pings.
+   BLUE PHONE: stage two, loop state in Redis, hand written grooves, bar line changes.
+   BLUE PHONE: stage three, Supabase login check, player heartbeats, heartbeat gate on the loop.
+   BLUE PHONE: v4, one room holds every app. The loop, the clock and the heartbeats are shared by all
    phones that typed the same room code, whatever app they run. Board messages only travel between
    phones running the same app, and each app has its own stored board inside the room.
-   ORANGE PHONE: v5 seats. Every phone gets a seat number among the phones of its own app in its room,
+   BLUE PHONE: v5 seats. Every phone gets a seat number among the phones of its own app in its room,
    the lowest number not taken. A phone keeps its seat until it leaves. Apps use the seat to pick a
    different voice for each phone. server sends {type:"seat", seat, count}
 
@@ -71,7 +71,7 @@ const SUPA_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SUPA_KEY = process.env.SUPABASE_ANON_KEY || "";
 const AUTH_ON = !!(SUPA_URL && SUPA_KEY);
 const ALLOWED = (process.env.ALLOWED_EMAILS || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean);
-/* ORANGE PHONE: Supabase itself checks the token, so no secret is stored on this server for login. */
+/* BLUE PHONE: Supabase itself checks the token, so no secret is stored on this server for login. */
 async function verify(token) {
   if (typeof token !== "string" || token.length < 20 || token.length > 4000) return { reason: "sign in again" };
   let user;
@@ -88,7 +88,7 @@ async function verify(token) {
   return { user: { id: String(user.id), email: email, exp: exp } };
 }
 
-/* ORANGE PHONE: hand written grooves. The pad slot exists in every groove and starts silent. */
+/* BLUE PHONE: hand written grooves. The pad slot exists in every groove and starts silent. */
 const GROOVES = {
   "Click": {
     drums: "ck cl cl cl",
@@ -240,7 +240,7 @@ function startLoop(room, now) {
   s.playing = true; s.idle = false; s.epoch = now + 300; s.barOffset = 0; s.pending = null;
   room.lastStart = now;
 }
-/* ORANGE PHONE: added heartbeat gate. One key per active player, in memory and in Redis with a 20 second expiry. */
+/* BLUE PHONE: added heartbeat gate. One key per active player, in memory and in Redis with a 20 second expiry. */
 function beat(room, ws) {
   const id = ws.user ? ws.user.id : ws.device, now = Date.now();
   room.beats.set(id, now);
@@ -364,7 +364,7 @@ wss.on("connection", async (ws, req) => {
   ws.app = app;
   if (!app || !name || !ws.device) { ws.close(1008, "app, room and device are required"); return }
 
-  /* ORANGE PHONE: a phone enters its room at once while login is off, or after its token checks out while login is on.
+  /* BLUE PHONE: a phone enters its room at once while login is off, or after its token checks out while login is on.
      Until then only clock pings and the login message are answered. Other messages wait in a short queue. */
   const early = []; let room = null, entering = false;
   async function enter() {
