@@ -15,6 +15,9 @@
    id is the start of the device id. playing is true while that phone has a live heartbeat.
    The app field reads "roster", so apps that only listen to their own app name drop it untouched.
    Hoofer Sync uses it to put one dancer on the floor for every phone in the band.
+   BLUE PHONE: v6 seat fix. The seat message carries the schema of the phone it goes to, and a phone only gets it
+   once its hello has told the server that schema. Apps without a seat handler (Axiom, Looper) treated the untagged
+   seat message as a newer schema and showed "update needed", which dropped them out of the band.
 
    One WebSocket per phone. The address carries app, room and device in the query string.
    Every message is one JSON object with a type field.
@@ -213,7 +216,7 @@ function seatUp(room, app) {
     let n = 0; while (taken.has(n)) n++;
     ws.seat = n; taken.add(n);
   });
-  peers.forEach(ws => sendTo(ws, { type: "seat", app: app, seat: ws.seat, count: peers.length }));
+  peers.forEach(ws => { if (typeof ws.schema === "number") sendTo(ws, { type: "seat", app: app, schema: ws.schema, seat: ws.seat, count: peers.length }) });
 }
 
 /* Board messages go to the other phones running the same app. */
@@ -323,7 +326,9 @@ function onMessage(room, ws, text) {
   if (++ws.rateCount > MAX_MESSAGES_PER_SECOND) return;
   let m; try { m = JSON.parse(text) } catch (e) { return }
   if (!m || typeof m !== "object" || typeof m.type !== "string") return;
+  const knewSchema = typeof ws.schema === "number";
   if (typeof m.schema === "number") ws.schema = m.schema;
+  if (!knewSchema && typeof ws.schema === "number") seatUp(room, ws.app);
   m.app = ws.app; m.device = ws.device;
   const board = room.boards[ws.app];
 
