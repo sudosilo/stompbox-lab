@@ -15,6 +15,7 @@
    id is the start of the device id. playing is true while that phone has a live heartbeat.
    The app field reads "roster", so apps that only listen to their own app name drop it untouched.
    Hoofer Sync uses it to put one dancer on the floor for every phone in the band.
+   BLUE PHONE: v6 more grooves, House, Jungle, Disco, Funk, Boom Bap, Trap, Reggaeton and Rock, each with its own tempo.
    BLUE PHONE: v6 seat fix. The seat message carries the schema of the phone it goes to, and a phone only gets it
    once its hello has told the server that schema. Apps without a seat handler (Axiom, Looper) treated the untagged
    seat message as a newer schema and showed "update needed", which dropped them out of the band.
@@ -119,8 +120,58 @@ const GROOVES = {
     bass: "<[d1 ~ ~ ~ ~ ~ d1 ~] [bb0 ~ ~ ~ ~ ~ c1 ~]>",
     lead: "<[~ ~ a4 ~ f4 ~ ~ d4] [~ ~ g4 ~ f4 ~ e4 ~]>",
     pad: "<[d3,f3,a3] [bb2,d3,f3]>"
+  },
+  /* BLUE PHONE: v6 more grooves. Each of these sets its own tempo when picked. */
+  "House": {
+    drums: "bd*4, ~ cp ~ cp, [~ oh]*4, hh*16",
+    bass: "<[~ a1 ~ a1 ~ a1 ~ a2] [~ f1 ~ f1 ~ f1 ~ f2] [~ c2 ~ c2 ~ c2 ~ c3] [~ g1 ~ g1 ~ g1 ~ g2]>",
+    lead: "<[~ [a4,c5,e5] ~ ~ ~ [a4,c5,e5] ~ ~] [~ [f4,a4,c5] ~ ~ ~ [f4,a4,c5] ~ ~] [~ [c5,e5,g5] ~ ~ ~ [c5,e5,g5] ~ ~] [~ [g4,b4,d5] ~ ~ ~ [g4,b4,d5] ~ ~]>",
+    pad: "<[a3,c4,e4] [f3,a3,c4] [c4,e4,g4] [g3,b3,d4]>"
+  },
+  "Jungle": {
+    drums: "bd ~ ~ ~ sd ~ ~ bd ~ ~ bd ~ sd ~ [~ sd] ~, [~ hh]*8, <~ ~ ~ [~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ sd sd sd sd]>",
+    bass: "<[d1@3 ~ ~ ~ f1 ~] [a0@3 ~ ~ ~ c1 ~]>",
+    lead: "<[~ ~ ~ ~ ~ ~ d4 ~] [~ ~ ~ ~ ~ ~ ~ ~] [~ ~ ~ ~ ~ ~ f4 e4] [~ ~ ~ ~ ~ ~ ~ ~]>",
+    pad: "<[d3,f3,a3] [a2,c3,e3]>"
+  },
+  "Disco": {
+    drums: "bd*4, ~ sd ~ sd, [~ oh]*4, hh*8",
+    bass: "<[c2 c3]*4 [a1 a2]*4 [f1 f2]*4 [g1 g2]*4>",
+    lead: "<[e5 ~ g5 ~ e5 ~ c5 ~] [e5 ~ c5 ~ a4 ~ ~ ~] [f5 ~ a5 ~ f5 ~ c5 ~] [d5 ~ b4 ~ g4 ~ ~ ~]>",
+    pad: "<[c4,e4,g4] [a3,c4,e4] [f3,a3,c4] [g3,b3,d4]>"
+  },
+  "Funk": {
+    drums: "bd ~ ~ bd ~ ~ bd ~ ~ ~ bd ~ ~ ~ ~ ~, ~ ~ ~ ~ sd ~ ~ ~ ~ ~ ~ ~ sd ~ ~ sd, hh*16",
+    bass: "<[e1 ~ e2 ~ ~ e1 ~ g1 ~ a1 ~ ~ b1 ~ d2 ~] [e1 ~ e2 ~ ~ e1 ~ g1 ~ a1 ~ g1 ~ e1 d1 ~]>",
+    lead: "<[~ ~ [e4,g4] ~ ~ [e4,g4] ~ ~ ~ ~ [d4,a4] ~ ~ ~ ~ ~]>",
+    pad: "~"
+  },
+  "Boom Bap": {
+    drums: "bd ~ ~ ~ ~ ~ bd ~ ~ bd ~ ~ ~ ~ ~ ~, ~ ~ ~ ~ sd ~ ~ ~ ~ ~ ~ ~ sd ~ ~ ~, [hh hh hh oh]*2",
+    bass: "<[c2 ~ ~ ~ ~ ~ c2 ~ ~ eb2 ~ ~ ~ ~ ~ ~] [ab1 ~ ~ ~ ~ ~ ab1 ~ ~ bb1 ~ ~ ~ ~ ~ ~]>",
+    lead: "<[~ ~ ~ ~ ~ ~ ~ ~ g4 ~ eb4 ~ ~ ~ ~ ~] [~ ~ ~ ~ ~ ~ ~ ~ f4 ~ c4 ~ ~ ~ ~ ~]>",
+    pad: "<[c4,eb4,g4] [ab3,c4,eb4]>"
+  },
+  "Trap": {
+    drums: "bd ~ ~ ~ ~ ~ ~ bd ~ ~ bd ~ ~ ~ ~ ~, ~ ~ ~ ~ ~ ~ ~ ~ cp ~ ~ ~ ~ ~ ~ ~, <hh*8 [hh hh hh hh hh hh [hh hh hh] [hh hh hh]]>",
+    bass: "<[c1 ~ ~ ~ ~ ~ ~ c1 ~ ~ eb1 ~ ~ ~ ~ ~] [ab0 ~ ~ ~ ~ ~ ~ ab0 ~ ~ bb0 ~ ~ ~ ~ ~]>",
+    lead: "<[~ g4 ~ ~ eb4 ~ ~ ~ ~ g4 ~ ~ c5 ~ ~ ~] [~ ab4 ~ ~ eb4 ~ ~ ~ ~ ab4 ~ ~ bb4 ~ ~ ~]>",
+    pad: "~"
+  },
+  "Reggaeton": {
+    drums: "bd*4, [~ ~ ~ sd ~ ~ sd ~]*2, hh*8",
+    bass: "<[a1 ~ ~ a1 ~ ~ a1 ~] [f1 ~ ~ f1 ~ ~ f1 ~] [c2 ~ ~ c2 ~ ~ c2 ~] [g1 ~ ~ g1 ~ ~ g1 ~]>",
+    lead: "<[~ e5 ~ ~ c5 ~ ~ ~] [~ c5 ~ ~ a4 ~ ~ ~] [~ e5 ~ ~ g5 ~ ~ ~] [~ d5 ~ ~ b4 ~ ~ ~]>",
+    pad: "<[a3,c4,e4] [f3,a3,c4] [c4,e4,g4] [g3,b3,d4]>"
+  },
+  "Rock": {
+    drums: "bd [~ bd] bd ~, ~ sd ~ sd, hh*8",
+    bass: "<[e1 e1 e1 e1 e1 e1 e1 e1] [e1 e1 e1 e1 g1 g1 a1 a1]>",
+    lead: "<[e4 ~ ~ ~ g4 ~ a4 ~] [e4 ~ ~ ~ d4 ~ e4 ~]>",
+    pad: "~"
   }
 };
+const GROOVE_TEMPO = { "House": 124, "Jungle": 172, "Disco": 118, "Funk": 100, "Boom Bap": 90, "Trap": 140, "Reggaeton": 96, "Rock": 120 };
 const DEFAULT_GROOVE = "Pocket";
 
 /* ---------- redis, optional ---------- */
@@ -311,6 +362,7 @@ function transport(room, m) {
   } else if (m.action === "groove") {
     if (!Object.prototype.hasOwnProperty.call(GROOVES, m.groove)) return false;
     next.groove = m.groove; next.slots = Object.assign({}, GROOVES[m.groove]);
+    if (GROOVE_TEMPO[m.groove]) next.tempo = Math.min(TEMPO_MAX, Math.max(TEMPO_MIN, GROOVE_TEMPO[m.groove]));
   } else return false;
   if (!s.playing) { s.tempo = next.tempo; s.groove = next.groove; s.slots = next.slots; s.pending = null; return true }
   /* A change while playing lands on a bar line. Tempo never changes inside a bar. */
