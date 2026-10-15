@@ -1,4 +1,4 @@
-/* stompbox-lab-v5-server.js
+/* stompbox-lab-v6-server.js
    Stompbox Lab sync and loop server. Runs on Railway from the backend folder.
 
    BLUE PHONE: stage one, WebSocket rooms, board relay, server clock pings.
@@ -10,6 +10,11 @@
    BLUE PHONE: v5 seats. Every phone gets a seat number among the phones of its own app in its room,
    the lowest number not taken. A phone keeps its seat until it leaves. Apps use the seat to pick a
    different voice for each phone. server sends {type:"seat", seat, count}
+   BLUE PHONE: v6 roster. Every phone in a room gets the list of every phone in that room, whatever app it runs:
+   server sends {type:"roster", app:"roster", phones:[{app, seat, id, playing}]}
+   id is the start of the device id. playing is true while that phone has a live heartbeat.
+   The app field reads "roster", so apps that only listen to their own app name drop it untouched.
+   Hoofer Sync uses it to put one dancer on the floor for every phone in the band.
 
    One WebSocket per phone. The address carries app, room and device in the query string.
    Every message is one JSON object with a type field.
@@ -212,6 +217,24 @@ function seatUp(room, app) {
 }
 
 /* Board messages go to the other phones running the same app. */
+/* BLUE PHONE: v6 roster. Sent when a phone joins or leaves, and when a phone starts or stops playing. */
+function rosterOf(room) {
+  const now = Date.now(), list = [];
+  room.sockets.forEach(ws => {
+    const id = ws.user ? ws.user.id : ws.device, t = room.beats.get(id);
+    list.push({ app: ws.app, seat: typeof ws.seat === "number" ? ws.seat : 0, id: String(ws.device).slice(0, 8), playing: !!(t && now - t <= BEAT_SECONDS * 1000) });
+  });
+  list.sort((a, b) => a.app < b.app ? -1 : a.app > b.app ? 1 : a.seat - b.seat || (a.id < b.id ? -1 : 1));
+  return list;
+}
+function rosterUp(room, force) {
+  const list = rosterOf(room), sig = JSON.stringify(list);
+  if (!force && sig === room.rosterSig) return;
+  room.rosterSig = sig;
+  const text = JSON.stringify({ type: "roster", app: "roster", phones: list, now: Date.now() });
+  room.sockets.forEach(ws => { if (ws.readyState === 1) ws.send(text) });
+}
+
 function relay(room, msg, from) {
   const text = JSON.stringify(msg);
   room.sockets.forEach(ws => { if (ws !== from && ws.app === from.app && ws.readyState === 1) ws.send(text) });
@@ -243,7 +266,9 @@ function startLoop(room, now) {
 /* BLUE PHONE: added heartbeat gate. One key per active player, in memory and in Redis with a 20 second expiry. */
 function beat(room, ws) {
   const id = ws.user ? ws.user.id : ws.device, now = Date.now();
+  const fresh = !room.beats.has(id);
   room.beats.set(id, now);
+  if (fresh) rosterUp(room);
   if (redis) redis.set(PREFIX + "beat:" + room.id + ":" + id, "1", "EX", BEAT_SECONDS).catch(() => {});
   if (room.loop.idle && !room.loop.playing) {
     startLoop(room, now);
@@ -345,7 +370,7 @@ const server = http.createServer((req, res) => {
   if (req.url === "/health") {
     let phones = 0; rooms.forEach(r => { phones += r.sockets.size });
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, version: 5, rooms: rooms.size, phones: phones, redis: redis ? redis.status : "off", login: AUTH_ON ? "on" : "off" }));
+    res.end(JSON.stringify({ ok: true, version: 6, rooms: rooms.size, phones: phones, redis: redis ? redis.status : "off", login: AUTH_ON ? "on" : "off" }));
     return;
   }
   res.writeHead(200, { "content-type": "text/plain" });
@@ -380,11 +405,13 @@ wss.on("connection", async (ws, req) => {
     early.length = 0;
     welcome(room, ws);
     seatUp(room, app);
+    rosterUp(room, true);
   }
   ws.on("close", () => {
     if (!room) return;
     room.sockets.delete(ws);
     seatUp(room, ws.app);
+    rosterUp(room);
     if (!room.sockets.size) {
       Object.keys(room.boardTimers).forEach(a => {
         if (room.boardTimers[a]) { clearTimeout(room.boardTimers[a]); room.boardTimers[a] = null; save("board:" + a + ":" + room.id, room.boards[a]) }
@@ -419,6 +446,7 @@ const gateTimer = setInterval(() => {
   const now = Date.now();
   rooms.forEach(room => {
     gate(room, now);
+    rosterUp(room);
     if (redis && !room.sockets.size && !room.loop.playing) rooms.delete(room.id);
   });
   if (!AUTH_ON) return;
