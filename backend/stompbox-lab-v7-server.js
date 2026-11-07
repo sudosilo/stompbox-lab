@@ -24,7 +24,9 @@
    so a full stadium never floods the room. Each seat phone tells the server the seat it scanned, and a host
    screen unlocked with the STADIUM_HOST_CODE variable sends the seat layout, the light show and the sound flybys.
      seat phone sends  {type:"stadium-seat", seat:"A-3-12"}
-     host sends        {type:"stadium-host", code}        server answers {type:"stadium-host", ok, reason}
+     host sends        {type:"stadium-host", token}       server answers {type:"stadium-host", ok, reason, email, owner}
+                       ({type:"stadium-host", code} only while Supabase is not set up)
+     owner sends       {type:"stadium-hosts", action:"add"|"remove", email}   server answers {type:"stadium-hosts", owners, hosts}
      host sends        {type:"stadium-layout", layout}    server sends every phone {type:"stadium-layout", layout, v}
      host sends        {type:"stadium-cue", cue}          server sends every phone {type:"stadium-cue", cue}
      host sends        {type:"stadium-sound", sound}      server sends every phone {type:"stadium-sound", sound}
@@ -81,7 +83,11 @@
      SUPABASE_ANON_KEY  optional, the public Supabase key
      ALLOWED_EMAILS     optional, comma separated list of emails allowed to play, blank allows every signed in player
      ALLOWED_ORIGINS  optional, comma separated list of page origins allowed to connect
-     STADIUM_HOST_CODE  optional, the code that unlocks a stadium host screen; without it no host can unlock */
+     STADIUM_HOST_CODE  optional, the code that unlocks a stadium host screen while Supabase is not set up
+     STADIUM_HOST_EMAILS  BLUE PHONE: comma separated emails of the show owners. While SUPABASE_URL and
+                        SUPABASE_ANON_KEY are set, a host screen unlocks only with a Supabase sign in by an owner,
+                        or by a host an owner added on the host screen. The host code no longer unlocks it.
+     SUPABASE_BAND_LOGIN  set to on to make the band apps sign in too; without it only stadium hosts sign in */
 "use strict";
 
 const http = require("http");
@@ -111,7 +117,14 @@ const CUE_TYPES = ["hold", "rainbow", "wave", "ripple", "beat", "picture", "chec
 /* ---------- login, optional ---------- */
 const SUPA_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SUPA_KEY = process.env.SUPABASE_ANON_KEY || "";
-const AUTH_ON = !!(SUPA_URL && SUPA_KEY);
+/* BLUE PHONE: Supabase signs in stadium hosts whenever it is set up. Band apps only need a sign in when
+   SUPABASE_BAND_LOGIN is on, because most of them have no sign in screen. */
+const SUPA_ON = !!(SUPA_URL && SUPA_KEY);
+const AUTH_ON = SUPA_ON && process.env.SUPABASE_BAND_LOGIN === "on";
+const OWNERS = (process.env.STADIUM_HOST_EMAILS || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean);
+/* Hosts the owners added on the host screen, kept in Redis for every room. */
+let extraHosts = [];
+function isHost(email) { return OWNERS.indexOf(email) >= 0 || extraHosts.indexOf(email) >= 0; }
 const ALLOWED = (process.env.ALLOWED_EMAILS || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean);
 /* BLUE PHONE: Supabase itself checks the token, so no secret is stored on this server for login. */
 async function verify(token) {
@@ -127,7 +140,7 @@ async function verify(token) {
   if (ALLOWED.length && ALLOWED.indexOf(email) < 0) return { reason: "this account is not on the player list" };
   let exp = Date.now() + 600000;
   try { exp = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString()).exp * 1000 || exp } catch (e) {}
-  return { user: { id: String(user.id), email: email, exp: exp } };
+  return { user: { id: String(user.id), email: email, exp: exp, confirmed: !!(user.email_confirmed_at || user.confirmed_at) } };
 }
 
 /* BLUE PHONE: hand written grooves. The pad slot exists in every groove and starts silent. */
@@ -422,8 +435,44 @@ function stadiumMessage(room, ws, m) {
     sendTo(ws, { type: "stadium-seated", app: ws.app, seat: ws.stadiumSeat });
     return true;
   }
+  if (m.type === "stadium-hosts") {
+    /* owners add or remove the other hosts */
+    if (!ws.host || !ws.hostEmail || OWNERS.indexOf(ws.hostEmail) < 0) return true;
+    const email = String(m.email || "").trim().toLowerCase().slice(0, 120);
+    if (m.action === "add" && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) && extraHosts.indexOf(email) < 0 && extraHosts.length < 50) extraHosts.push(email);
+    if (m.action === "remove" && OWNERS.indexOf(email) < 0) {
+      extraHosts = extraHosts.filter(e => e !== email);
+      /* a removed host loses control right away */
+      wss.clients.forEach(c => { if (c.host && c.hostEmail === email) { c.host = false; c.hostExp = 0; rooms.forEach(r => { if (r.st) r.st.hosts.delete(c); }); sendTo(c, { type: "stadium-host", app: c.app, ok: false, reason: "you were removed from the host list", login: true }); } });
+    }
+    if (redis) redis.set(PREFIX + "stadium-hosts", JSON.stringify(extraHosts)).catch(() => {});
+    sendTo(ws, { type: "stadium-hosts", app: ws.app, owners: OWNERS, hosts: extraHosts });
+    return true;
+  }
   if (m.type === "stadium-host") {
-    if (ws.host) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: true }); return true; }
+    if (ws.host && !(SUPA_ON && m.token)) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: true, email: ws.hostEmail || "" }); return true; }
+    if (SUPA_ON) {
+      if (!OWNERS.length) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "no host emails are set on the server" }); return true; }
+      if (typeof m.token !== "string") { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "sign in to host", login: true }); return true; }
+      verify(m.token).then(result => {
+        if (ws.readyState !== 1) return;
+        if (!result.user) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: result.reason, login: true }); return; }
+        /* an unconfirmed account could carry anyone's email, so a host must have confirmed theirs */
+        if (!result.user.confirmed) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "confirm your email from the Supabase message first", login: true }); return; }
+        if (!isHost(result.user.email)) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: result.user.email + " is not on the host list", login: true }); return; }
+        const first = !ws.host;
+        ws.host = true; ws.hostEmail = result.user.email; ws.hostExp = result.user.exp; st.hosts.add(ws); st.countSig = "";
+        sendTo(ws, { type: "stadium-host", app: ws.app, ok: true, email: ws.hostEmail, owner: OWNERS.indexOf(ws.hostEmail) >= 0 });
+        if (OWNERS.indexOf(ws.hostEmail) >= 0) sendTo(ws, { type: "stadium-hosts", app: ws.app, owners: OWNERS, hosts: extraHosts });
+        if (first) {
+          sendTo(ws, { type: "stadium-layout", app: ws.app, layout: st.layout, v: st.v });
+          if (st.cue) sendTo(ws, { type: "stadium-cue", app: ws.app, cue: st.cue });
+          sendTo(ws, { type: "stadium-plan", app: ws.app, plan: st.plan });
+          if (st.beacon) sendTo(ws, { type: "stadium-beacon", app: ws.app, beacon: st.beacon });
+        }
+      });
+      return true;
+    }
     if (!HOST_CODE) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "no host code is set on the server" }); return true; }
     if (!hostOk(m.code)) {
       ws.hostFails = (ws.hostFails || 0) + 1;
@@ -649,10 +698,16 @@ function welcome(room, ws) {
 const clean = (v, max, pattern) => String(v || "").toLowerCase().replace(pattern, "").slice(0, max);
 
 const server = http.createServer((req, res) => {
+  /* BLUE PHONE: the public Supabase address and key, so the host screen can sign in. Both are safe to hand out. */
+  if (req.url === "/stadium-login") {
+    res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*", "cache-control": "no-store" });
+    res.end(JSON.stringify(SUPA_ON ? { url: SUPA_URL, key: SUPA_KEY } : {}));
+    return;
+  }
   if (req.url === "/health") {
     let phones = 0; rooms.forEach(r => { phones += r.sockets.size });
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, version: 7, stadium: HOST_CODE ? "host code set" : "no host code", rooms: rooms.size, phones: phones, redis: redis ? redis.status : "off", login: AUTH_ON ? "on" : "off" }));
+    res.end(JSON.stringify({ ok: true, version: 7, stadium: SUPA_ON ? (OWNERS.length ? "supabase host sign in" : "supabase on, no host emails") : HOST_CODE ? "host code set" : "no host code", bandLogin: AUTH_ON ? "on" : "off", rooms: rooms.size, phones: phones, redis: redis ? redis.status : "off", login: AUTH_ON ? "on" : "off" }));
     return;
   }
   res.writeHead(200, { "content-type": "text/plain" });
@@ -741,6 +796,10 @@ const gateTimer = setInterval(() => {
     rosterUp(room);
     if (redis && !room.sockets.size && !room.loop.playing) rooms.delete(room.id);
   });
+  /* a host whose sign in ran out stops being a host until the screen signs in again */
+  wss.clients.forEach(ws => {
+    if (ws.host && ws.hostExp && now > ws.hostExp + 30000) { ws.host = false; ws.hostExp = 0; rooms.forEach(r => { if (r.st) r.st.hosts.delete(ws); }); sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "sign in again", login: true }); }
+  });
   if (!AUTH_ON) return;
   wss.clients.forEach(ws => {
     if (ws.stadium) return;
@@ -754,5 +813,6 @@ const sweep = setInterval(() => {
   wss.clients.forEach(ws => { if (!ws.alive) { ws.terminate(); return } ws.alive = false; try { ws.ping() } catch (e) {} });
 }, 25000);
 
+(async () => { const h = await load("stadium-hosts"); if (Array.isArray(h)) extraHosts = h.filter(e => typeof e === "string"); })();
 server.listen(PORT, () => console.log("stompbox-lab server on port " + PORT + ", redis " + (redis ? "on" : "off") + ", login " + (AUTH_ON ? "on" : "off")));
 process.on("SIGTERM", () => { clearInterval(sweep); clearInterval(gateTimer); clearInterval(countTimer); wss.clients.forEach(ws => ws.close(1001)); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000) });
