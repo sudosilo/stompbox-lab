@@ -98,7 +98,8 @@ const MAX_STADIUM_PHONES = 2500;
 const MAX_STADIUM_JSON = 48000;
 const HOST_CODE = process.env.STADIUM_HOST_CODE || "";
 /* BLUE PHONE: image puts one picture on every screen, video plays one video link on every screen in step. */
-const CUE_TYPES = ["hold", "rainbow", "wave", "ripple", "beat", "picture", "check", "dark", "image", "video"];
+/* BLUE PHONE: demo runs a Rainbow Run animation across the crowd, one phone per pixel. */
+const CUE_TYPES = ["hold", "rainbow", "wave", "ripple", "beat", "picture", "check", "dark", "image", "video", "demo"];
 
 /* ---------- login, optional ---------- */
 const SUPA_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
@@ -461,6 +462,7 @@ function stadiumMessage(room, ws, m) {
     const at = num(body.at, Date.now() - 6 * 3600000, Date.now() + 60000, Date.now() + 600);
     if (m.type === "stadium-cue") {
       if (CUE_TYPES.indexOf(body.type) < 0) return true;
+      if (body.type === "demo" && !(typeof body.scene === "string" && /^[a-z]{2,16}$/.test(body.scene))) return true;
       if (body.type === "image" && !(typeof body.src === "string" && /^data:image\/(jpeg|png|webp);base64,/.test(body.src))) return true;
       if (body.type === "video" && !(typeof body.url === "string" && body.url.length <= 600 && /^https:\/\//.test(body.url))) return true;
       st.cue = Object.assign({}, body, { at: at });
