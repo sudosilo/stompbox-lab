@@ -1,4 +1,4 @@
-/* stompbox-lab-v6-server.js
+/* stompbox-lab-v7-server.js
    Stompbox Lab sync and loop server. Runs on Railway from the backend folder.
 
    BLUE PHONE: stage one, WebSocket rooms, board relay, server clock pings.
@@ -19,6 +19,17 @@
    BLUE PHONE: v6 seat fix. The seat message carries the schema of the phone it goes to, and a phone only gets it
    once its hello has told the server that schema. Apps without a seat handler (Axiom, Looper) treated the untagged
    seat message as a newer schema and showed "update needed", which dropped them out of the band.
+   BLUE PHONE: v7 stadium mode. A phone that connects with mode=stadium in its address is a stadium seat.
+   A room holding stadium seats takes up to 2500 phones. Stadium seats skip login, auto seats and the roster,
+   so a full stadium never floods the room. Each seat phone tells the server the seat it scanned, and a host
+   screen unlocked with the STADIUM_HOST_CODE variable sends the seat layout, the light show and the sound flybys.
+     seat phone sends  {type:"stadium-seat", seat:"A-3-12"}
+     host sends        {type:"stadium-host", code}        server answers {type:"stadium-host", ok, reason}
+     host sends        {type:"stadium-layout", layout}    server sends every phone {type:"stadium-layout", layout, v}
+     host sends        {type:"stadium-cue", cue}          server sends every phone {type:"stadium-cue", cue}
+     host sends        {type:"stadium-sound", sound}      server sends every phone {type:"stadium-sound", sound}
+     server sends hosts {type:"stadium-count", phones, seats:[...]} every two seconds while it changes
+   The layout and the cue are kept in Redis, so a phone that joins late gets both at once.
 
    One WebSocket per phone. The address carries app, room and device in the query string.
    Every message is one JSON object with a type field.
@@ -56,10 +67,12 @@
      SUPABASE_URL       optional, with SUPABASE_ANON_KEY it turns login on
      SUPABASE_ANON_KEY  optional, the public Supabase key
      ALLOWED_EMAILS     optional, comma separated list of emails allowed to play, blank allows every signed in player
-     ALLOWED_ORIGINS  optional, comma separated list of page origins allowed to connect */
+     ALLOWED_ORIGINS  optional, comma separated list of page origins allowed to connect
+     STADIUM_HOST_CODE  optional, the code that unlocks a stadium host screen; without it no host can unlock */
 "use strict";
 
 const http = require("http");
+const crypto = require("crypto");
 const { WebSocketServer } = require("ws");
 
 const PORT = process.env.PORT || 8080;
@@ -74,6 +87,11 @@ const SLOT_IDS = ["drums", "bass", "lead", "pad"];
 const BEAT_SECONDS = 20;
 const START_GRACE_MS = 15000;
 const AUTH_WAIT_MS = 15000;
+/* BLUE PHONE: v7 stadium limits */
+const MAX_STADIUM_PHONES = 2500;
+const MAX_STADIUM_JSON = 48000;
+const HOST_CODE = process.env.STADIUM_HOST_CODE || "";
+const CUE_TYPES = ["hold", "rainbow", "wave", "ripple", "beat", "picture", "check", "dark"];
 
 /* ---------- login, optional ---------- */
 const SUPA_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
@@ -260,7 +278,7 @@ function sendTo(ws, msg) { if (ws.readyState === 1) ws.send(JSON.stringify(msg))
 /* Hands out the lowest free seat to a phone, then tells every phone of that app its seat and how many share the app. */
 function seatUp(room, app) {
   const peers = [];
-  room.sockets.forEach(ws => { if (ws.app === app) peers.push(ws); });
+  room.sockets.forEach(ws => { if (ws.app === app && !ws.stadium) peers.push(ws); });
   const taken = new Set(peers.filter(ws => typeof ws.seat === "number").map(ws => ws.seat));
   peers.forEach(ws => {
     if (typeof ws.seat === "number") return;
@@ -275,6 +293,7 @@ function seatUp(room, app) {
 function rosterOf(room) {
   const now = Date.now(), list = [];
   room.sockets.forEach(ws => {
+    if (ws.stadium) return;
     const id = ws.user ? ws.user.id : ws.device, t = room.beats.get(id);
     list.push({ app: ws.app, seat: typeof ws.seat === "number" ? ws.seat : 0, id: String(ws.device).slice(0, 8), playing: !!(t && now - t <= BEAT_SECONDS * 1000) });
   });
@@ -286,7 +305,7 @@ function rosterUp(room, force) {
   if (!force && sig === room.rosterSig) return;
   room.rosterSig = sig;
   const text = JSON.stringify({ type: "roster", app: "roster", phones: list, now: Date.now() });
-  room.sockets.forEach(ws => { if (ws.readyState === 1) ws.send(text) });
+  room.sockets.forEach(ws => { if (ws.readyState === 1 && !ws.stadium) ws.send(text) });
 }
 
 function relay(room, msg, from) {
@@ -311,6 +330,119 @@ function saveBoardSoon(room, app) {
   room.boardTimers[app] = setTimeout(() => { room.boardTimers[app] = null; save("board:" + app + ":" + room.id, room.boards[app]) }, 1000);
 }
 
+/* ---------- stadium ---------- */
+/* BLUE PHONE: v7 stadium state per room. The seat math lives in rainbow-run-stadium-v1-core.js; the server only
+   counts seats to hold a layout under the cap. */
+function stadiumOf(room) {
+  if (!room.st) room.st = { layout: null, v: 0, cue: null, phones: 0, hosts: new Set(), countSig: "", loaded: false };
+  return room.st;
+}
+async function stadiumLoad(room) {
+  const st = stadiumOf(room);
+  if (st.loaded) return st;
+  st.loaded = true;
+  const saved = await load("stadium:" + room.id);
+  if (saved && typeof saved === "object") { st.layout = saved.layout || null; st.v = saved.v || 0; st.cue = saved.cue || null; }
+  return st;
+}
+function stadiumSave(room) { const st = stadiumOf(room); save("stadium:" + room.id, { layout: st.layout, v: st.v, cue: st.cue }); }
+const num = (v, lo, hi, d) => { v = +v; return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d; };
+/* Cleans a layout from a host and counts its seats. Returns null when it breaks the rules. */
+function cleanLayout(L) {
+  if (!L || typeof L !== "object" || !Array.isArray(L.sections) || L.sections.length > 64) return null;
+  let total = 0;
+  const ids = new Set(), out = [];
+  for (const s of L.sections) {
+    if (!s || typeof s !== "object") return null;
+    const id = String(s.id || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
+    if (!id || ids.has(id)) return null;
+    ids.add(id);
+    const kind = s.kind === "arc" ? "arc" : "block";
+    const rows = Math.round(num(s.rows, 1, 200, 1)), seats = Math.round(num(s.seats, 1, 400, 1)), grow = Math.round(num(s.grow, -20, 40, 0));
+    for (let r = 0; r < rows; r++) total += Math.max(1, seats + grow * r);
+    out.push({ id: id, kind: kind, rows: rows, seats: seats, grow: grow,
+      x: num(s.x, -2000, 2000, 0), y: num(s.y, -2000, 2000, 0), rot: num(s.rot, -360, 360, 0),
+      r: num(s.r, 1, 2000, 30), a0: num(s.a0, -720, 720, 0), span: num(s.span, 1, 360, 40),
+      seatGap: num(s.seatGap, 0.3, 5, 0.6), rowGap: num(s.rowGap, 0.3, 5, 0.9) });
+  }
+  if (total > MAX_STADIUM_PHONES) return null;
+  return { name: String(L.name || "").slice(0, 40), sections: out, total: total };
+}
+function sizeOk(o) { try { return JSON.stringify(o).length <= MAX_STADIUM_JSON } catch (e) { return false } }
+/* Sends one stadium message to every phone in the room, each stamped with its own app name. */
+function broadcastStadium(room, msg) {
+  const texts = {};
+  room.sockets.forEach(ws => {
+    if (ws.readyState !== 1) return;
+    if (!texts[ws.app]) texts[ws.app] = JSON.stringify(Object.assign({}, msg, { app: ws.app }));
+    ws.send(texts[ws.app]);
+  });
+}
+function hostOk(code) {
+  if (!HOST_CODE || typeof code !== "string") return false;
+  const a = crypto.createHash("sha256").update(code).digest(), b = crypto.createHash("sha256").update(HOST_CODE).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+function stadiumMessage(room, ws, m) {
+  const st = stadiumOf(room);
+  if (m.type === "stadium-seat") {
+    const seat = String(m.seat || "").toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 16);
+    ws.stadiumSeat = seat || "";
+    sendTo(ws, { type: "stadium-seated", app: ws.app, seat: ws.stadiumSeat });
+    return true;
+  }
+  if (m.type === "stadium-host") {
+    if (ws.host) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: true }); return true; }
+    if (!HOST_CODE) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "no host code is set on the server" }); return true; }
+    if (!hostOk(m.code)) {
+      ws.hostFails = (ws.hostFails || 0) + 1;
+      sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "wrong host code" });
+      if (ws.hostFails >= 5) ws.close(1008, "too many host code tries");
+      return true;
+    }
+    ws.host = true; st.hosts.add(ws); st.countSig = "";
+    sendTo(ws, { type: "stadium-host", app: ws.app, ok: true });
+    sendTo(ws, { type: "stadium-layout", app: ws.app, layout: st.layout, v: st.v });
+    if (st.cue) sendTo(ws, { type: "stadium-cue", app: ws.app, cue: st.cue });
+    return true;
+  }
+  if (m.type === "stadium-layout" || m.type === "stadium-cue" || m.type === "stadium-sound") {
+    if (!ws.host) return true;
+    if (m.type === "stadium-layout") {
+      const L = cleanLayout(m.layout);
+      if (!L) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: true, reason: "layout refused, over the seat limit or malformed" }); return true; }
+      st.layout = L; st.v++;
+      stadiumSave(room); broadcastStadium(room, { type: "stadium-layout", layout: L, v: st.v });
+      return true;
+    }
+    const body = m.type === "stadium-cue" ? m.cue : m.sound;
+    if (!body || typeof body !== "object" || !sizeOk(body)) return true;
+    const at = num(body.at, Date.now() - 5000, Date.now() + 60000, Date.now() + 600);
+    if (m.type === "stadium-cue") {
+      if (CUE_TYPES.indexOf(body.type) < 0) return true;
+      st.cue = Object.assign({}, body, { at: at });
+      stadiumSave(room); broadcastStadium(room, { type: "stadium-cue", cue: st.cue });
+    } else {
+      broadcastStadium(room, { type: "stadium-sound", sound: Object.assign({}, body, { at: at }) });
+    }
+    return true;
+  }
+  return false;
+}
+/* Every two seconds hosts get how many seat phones are in and which seats they hold, while that changes. */
+function stadiumCount(room) {
+  const st = room.st;
+  if (!st || !st.hosts.size) return;
+  const seats = [];
+  let phones = 0;
+  room.sockets.forEach(ws => { if (ws.stadium) { phones++; if (ws.stadiumSeat) seats.push(ws.stadiumSeat); } });
+  seats.sort();
+  const sig = phones + "|" + seats.join(",");
+  if (sig === st.countSig) return;
+  st.countSig = sig;
+  st.hosts.forEach(ws => sendTo(ws, { type: "stadium-count", app: ws.app, phones: phones, seats: seats }));
+}
+
 /* ---------- heartbeat gate ---------- */
 function startLoop(room, now) {
   const s = room.loop;
@@ -322,8 +454,8 @@ function beat(room, ws) {
   const id = ws.user ? ws.user.id : ws.device, now = Date.now();
   const fresh = !room.beats.has(id);
   room.beats.set(id, now);
-  if (fresh) rosterUp(room);
-  if (redis) redis.set(PREFIX + "beat:" + room.id + ":" + id, "1", "EX", BEAT_SECONDS).catch(() => {});
+  if (fresh && !ws.stadium) rosterUp(room);
+  if (redis && !ws.stadium) redis.set(PREFIX + "beat:" + room.id + ":" + id, "1", "EX", BEAT_SECONDS).catch(() => {});
   if (room.loop.idle && !room.loop.playing) {
     startLoop(room, now);
     save("loop:" + room.id, room.loop); broadcastLoop(room);
@@ -378,11 +510,14 @@ function onMessage(room, ws, text) {
   if (++ws.rateCount > MAX_MESSAGES_PER_SECOND) return;
   let m; try { m = JSON.parse(text) } catch (e) { return }
   if (!m || typeof m !== "object" || typeof m.type !== "string") return;
+  if (typeof m.type === "string" && m.type.indexOf("stadium-") === 0) { stadiumMessage(room, ws, m); return }
   const knewSchema = typeof ws.schema === "number";
   if (typeof m.schema === "number") ws.schema = m.schema;
-  if (!knewSchema && typeof ws.schema === "number") seatUp(room, ws.app);
+  if (!knewSchema && typeof ws.schema === "number" && !ws.stadium) seatUp(room, ws.app);
   m.app = ws.app; m.device = ws.device;
   const board = room.boards[ws.app];
+  /* Stadium seats only listen. They send seats, clock pings and nothing that changes the band. */
+  if (ws.stadium) return;
 
   if (m.type === "beat") { beat(room, ws); return }
   if (m.type === "transport") {
@@ -406,6 +541,12 @@ function onMessage(room, ws, text) {
 /* A phone that joins gets the loop first, then the board the room already holds. */
 function welcome(room, ws) {
   sendTo(ws, loopMessage(room, ws.app));
+  const st = room.st;
+  if (st && (ws.stadium || st.layout)) {
+    sendTo(ws, { type: "stadium-layout", app: ws.app, layout: st.layout, v: st.v });
+    if (st.cue) sendTo(ws, { type: "stadium-cue", app: ws.app, cue: st.cue });
+  }
+  if (ws.stadium) return;
   const b = room.boards[ws.app];
   if (b.snap) {
     sendTo(ws, b.snap);
@@ -427,7 +568,7 @@ const server = http.createServer((req, res) => {
   if (req.url === "/health") {
     let phones = 0; rooms.forEach(r => { phones += r.sockets.size });
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, version: 6, rooms: rooms.size, phones: phones, redis: redis ? redis.status : "off", login: AUTH_ON ? "on" : "off" }));
+    res.end(JSON.stringify({ ok: true, version: 7, stadium: HOST_CODE ? "host code set" : "no host code", rooms: rooms.size, phones: phones, redis: redis ? redis.status : "off", login: AUTH_ON ? "on" : "off" }));
     return;
   }
   res.writeHead(200, { "content-type": "text/plain" });
@@ -444,6 +585,9 @@ wss.on("connection", async (ws, req) => {
   const name = clean(q.get("room"), 24, /[^a-z0-9]/g);
   ws.device = clean(q.get("device"), 64, /[^a-z0-9-]/g);
   ws.app = app;
+  ws.stadium = q.get("mode") === "stadium";
+  /* The host screen connects with mode=stadium-host. It is a normal band phone that also loads the stadium state. */
+  ws.stadiumHostPage = q.get("mode") === "stadium-host";
   if (!app || !name || !ws.device) { ws.close(1008, "app, room and device are required"); return }
 
   /* BLUE PHONE: a phone enters its room at once while login is off, or after its token checks out while login is on.
@@ -454,21 +598,26 @@ wss.on("connection", async (ws, req) => {
     entering = true;
     const loaded = await getRoom(name);
     await getBoard(loaded, app);
+    if (ws.stadium || ws.stadiumHostPage || loaded.st) await stadiumLoad(loaded);
     if (ws.readyState !== 1) return;
-    if (loaded.sockets.size >= MAX_PHONES_PER_ROOM) { ws.close(1013, "room full"); return }
+    /* BLUE PHONE: v7 a room with stadium seats holds up to 2500 phones, band phones included */
+    const st = loaded.st;
+    /* 2500 seat phones, plus the usual band phones and host screens on top */
+    const seatPhones = st ? st.phones : 0, others = loaded.sockets.size - seatPhones;
+    if (ws.stadium ? seatPhones >= MAX_STADIUM_PHONES : others >= MAX_PHONES_PER_ROOM && !(st && st.phones > 0 && others < MAX_PHONES_PER_ROOM * 2)) { ws.close(1013, "room full"); return }
+    if (ws.stadium) stadiumOf(loaded).phones++;
     loaded.sockets.add(ws);
     room = loaded;
     early.forEach(text => onMessage(room, ws, text));
     early.length = 0;
     welcome(room, ws);
-    seatUp(room, app);
-    rosterUp(room, true);
+    if (!ws.stadium) { seatUp(room, app); rosterUp(room, true); }
   }
   ws.on("close", () => {
     if (!room) return;
     room.sockets.delete(ws);
-    seatUp(room, ws.app);
-    rosterUp(room);
+    if (room.st) { if (ws.stadium) room.st.phones--; room.st.hosts.delete(ws); }
+    if (!ws.stadium) { seatUp(room, ws.app); rosterUp(room); }
     if (!room.sockets.size) {
       Object.keys(room.boardTimers).forEach(a => {
         if (room.boardTimers[a]) { clearTimeout(room.boardTimers[a]); room.boardTimers[a] = null; save("board:" + a + ":" + room.id, room.boards[a]) }
@@ -495,10 +644,12 @@ wss.on("connection", async (ws, req) => {
   });
   ws.alive = true; ws.on("pong", () => { ws.alive = true });
   ws.opened = Date.now();
-  if (!AUTH_ON) enter();
+  /* Stadium seats only watch and listen, so they join without a login. The host is locked by its code. */
+  if (!AUTH_ON || ws.stadium) enter();
 });
 
 /* Every few seconds: run the heartbeat gate, and close phones whose login is missing or ran out. */
+const countTimer = setInterval(() => { rooms.forEach(stadiumCount) }, 2000);
 const gateTimer = setInterval(() => {
   const now = Date.now();
   rooms.forEach(room => {
@@ -508,6 +659,7 @@ const gateTimer = setInterval(() => {
   });
   if (!AUTH_ON) return;
   wss.clients.forEach(ws => {
+    if (ws.stadium) return;
     if (!ws.user) { if (now - ws.opened > AUTH_WAIT_MS) ws.close(1008, "sign in") }
     else if (now > ws.user.exp + 30000) ws.close(1008, "login expired");
   });
@@ -519,4 +671,4 @@ const sweep = setInterval(() => {
 }, 25000);
 
 server.listen(PORT, () => console.log("stompbox-lab server on port " + PORT + ", redis " + (redis ? "on" : "off") + ", login " + (AUTH_ON ? "on" : "off")));
-process.on("SIGTERM", () => { clearInterval(sweep); clearInterval(gateTimer); wss.clients.forEach(ws => ws.close(1001)); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000) });
+process.on("SIGTERM", () => { clearInterval(sweep); clearInterval(gateTimer); clearInterval(countTimer); wss.clients.forEach(ws => ws.close(1001)); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000) });
