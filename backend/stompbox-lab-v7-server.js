@@ -116,7 +116,7 @@ const MAX_STADIUM_JSON = 48000;
 const HOST_CODE = process.env.STADIUM_HOST_CODE || "";
 /* BLUE PHONE: image puts one picture on every screen, video plays one video link on every screen in step. */
 /* BLUE PHONE: demo runs a Rainbow Run animation across the crowd, one phone per pixel. */
-const CUE_TYPES = ["hold", "rainbow", "wave", "ripple", "beat", "picture", "check", "dark", "image", "video", "demo", "youtube"];
+const CUE_TYPES = ["hold", "rainbow", "wave", "ripple", "beat", "picture", "check", "dark", "image", "video", "demo", "youtube", "share"];
 
 /* ---------- login, optional ---------- */
 const SUPA_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
@@ -474,6 +474,36 @@ function stadiumMessage(room, ws, m) {
     sendTo(ws, { type: "stadium-seated", app: ws.app, seat: ws.stadiumSeat });
     return true;
   }
+  /* BLUE PHONE: screen share stunt. Each seat tells the server where it sits; the host sends a small picture of
+     its shared screen several times a second, and the server sends every seat only its own color, so the
+     network carries a few bytes per phone instead of the whole picture. */
+  if (m.type === "stadium-pos") {
+    const x = +m.x, y = +m.y, u = +m.u, v = +m.v;
+    if ([x, y, u, v].every(Number.isFinite)) ws.pos = { x: x, y: y, u: Math.min(1, Math.max(0, u)), v: Math.min(1, Math.max(0, v)) };
+    return true;
+  }
+  if (m.type === "stadium-frame") {
+    if (!ws.host) return true;
+    const now = Date.now();
+    if (now - (ws.lastFrame || 0) < 70) return true;
+    const w = Math.round(+m.w), h = Math.round(+m.h);
+    if (!(w >= 2 && w <= 96 && h >= 2 && h <= 96) || typeof m.data !== "string" || m.data.length > 40000) return true;
+    const px = Buffer.from(m.data, "base64");
+    if (px.length !== w * h * 3) return true;
+    ws.lastFrame = now;
+    const B = m.box && typeof m.box === "object" ? m.box : null, bx0 = B ? +B.x0 : 0, by0 = B ? +B.y0 : 0, bw = B ? Math.max(1, +B.x1 - bx0) : 1, bh = B ? Math.max(1, +B.y1 - by0) : 1;
+    const useBox = !!B && [bx0, by0, bw, bh].every(Number.isFinite);
+    room.sockets.forEach(c => {
+      if (!c.stadium || !c.pos || c.readyState !== 1) return;
+      const u = useBox ? (c.pos.x - bx0) / bw : c.pos.u, v = useBox ? (c.pos.y - by0) / bh : c.pos.v;
+      const i = (Math.min(h - 1, Math.max(0, Math.floor(v * h))) * w + Math.min(w - 1, Math.max(0, Math.floor(u * w)))) * 3;
+      const col = ((px[i] << 16) | (px[i + 1] << 8) | px[i + 2]).toString(16).padStart(6, "0");
+      if (col === c.lastPx && now - (c.lastPxAt || 0) < 1000) return;
+      c.lastPx = col; c.lastPxAt = now;
+      c.send('{"type":"stadium-px","app":"' + c.app + '","c":"#' + col + '"}');
+    });
+    return true;
+  }
   if (m.type === "stadium-hosts") {
     /* owners add or remove the other hosts, and a room owner, or a server owner, can free a claimed room */
     if (!canManage(ws, st)) return true;
@@ -608,6 +638,8 @@ function stadiumMessage(room, ws, m) {
       /* BLUE PHONE: a video is an https link, or a video saved with Rainbow Run that every phone already holds */
       if (body.type === "video" && !(typeof body.url === "string" && body.url.length <= 600 && (/^https:\/\//.test(body.url) || /^rainbow-run-videos\/[a-z0-9-]+\.(mp4|webm)$/.test(body.url)))) return true;
       /* BLUE PHONE: a YouTube cue carries only the video id and where to start */
+      if (body.type === "share" && body.id !== undefined && !(typeof body.id === "string" && /^[A-Za-z0-9_-]{11}$/.test(body.id))) return true;
+      if (body.type === "share") body.start = Math.round(num(body.start, 0, 43200, 0));
       if (body.type === "youtube" && !(typeof body.id === "string" && /^[A-Za-z0-9_-]{11}$/.test(body.id))) return true;
       if (body.type === "youtube") body.start = Math.round(num(body.start, 0, 43200, 0));
       st.cue = Object.assign({}, body, { at: at });
