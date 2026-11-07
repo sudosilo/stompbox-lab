@@ -116,7 +116,7 @@ const MAX_STADIUM_JSON = 48000;
 const HOST_CODE = process.env.STADIUM_HOST_CODE || "";
 /* BLUE PHONE: image puts one picture on every screen, video plays one video link on every screen in step. */
 /* BLUE PHONE: demo runs a Rainbow Run animation across the crowd, one phone per pixel. */
-const CUE_TYPES = ["hold", "rainbow", "wave", "ripple", "beat", "picture", "check", "dark", "image", "video", "demo"];
+const CUE_TYPES = ["hold", "rainbow", "wave", "ripple", "beat", "picture", "check", "dark", "image", "video", "demo", "youtube"];
 
 /* ---------- login, optional ---------- */
 const SUPA_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
@@ -607,6 +607,9 @@ function stadiumMessage(room, ws, m) {
       if (body.type === "image" && !(typeof body.src === "string" && /^data:image\/(jpeg|png|webp);base64,/.test(body.src))) return true;
       /* BLUE PHONE: a video is an https link, or a video saved with Rainbow Run that every phone already holds */
       if (body.type === "video" && !(typeof body.url === "string" && body.url.length <= 600 && (/^https:\/\//.test(body.url) || /^rainbow-run-videos\/[a-z0-9-]+\.(mp4|webm)$/.test(body.url)))) return true;
+      /* BLUE PHONE: a YouTube cue carries only the video id and where to start */
+      if (body.type === "youtube" && !(typeof body.id === "string" && /^[A-Za-z0-9_-]{11}$/.test(body.id))) return true;
+      if (body.type === "youtube") body.start = Math.round(num(body.start, 0, 43200, 0));
       st.cue = Object.assign({}, body, { at: at });
       stadiumSave(room); broadcastStadium(room, { type: "stadium-cue", cue: st.cue });
     } else {
