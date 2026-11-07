@@ -36,6 +36,13 @@
      host sends  {type:"stadium-plan", plan}       server stores it and sends every host {type:"stadium-plan", plan}
      host sends  {type:"stadium-assign", seat}     server adds the seat to the plan unless it is already handed out,
                                                    then sends every host the plan and this host {type:"stadium-assigned", seat, ok}
+   BLUE PHONE: v7 timing beacon. A host plugged into the venue speakers plays a short chirp at every whole four
+   seconds of server time. Seat phones that hear it subtract the travel time from the speakers to their seat and
+   report how late it landed. The middle of those reports is the shared delay of the speaker system, and each
+   phone sets its clock against it, so every phone that hears the room lines up on the room's own sound.
+     host sends        {type:"stadium-beacon", beacon:{on, x, y}}      server sends every phone {type:"stadium-beacon", beacon}
+     seat phone sends  {type:"stadium-heard", err}                     ms late, after travel time, at most every few seconds
+     server sends      {type:"stadium-delay", delay, heard}             every phone, when the shared delay moves by more than 2 ms
 
    One WebSocket per phone. The address carries app, room and device in the query string.
    Every message is one JSON object with a type field.
@@ -342,7 +349,7 @@ function saveBoardSoon(room, app) {
 /* BLUE PHONE: v7 stadium state per room. The seat math lives in rainbow-run-stadium-v1-core.js; the server only
    counts seats to hold a layout under the cap. */
 function stadiumOf(room) {
-  if (!room.st) room.st = { layout: null, v: 0, cue: null, plan: null, phones: 0, hosts: new Set(), countSig: "", loaded: false };
+  if (!room.st) room.st = { layout: null, v: 0, cue: null, plan: null, beacon: null, delay: null, heard: 0, phones: 0, hosts: new Set(), countSig: "", loaded: false };
   return room.st;
 }
 async function stadiumLoad(room) {
@@ -431,6 +438,19 @@ function stadiumMessage(room, ws, m) {
     sendTo(ws, { type: "stadium-plan", app: ws.app, plan: st.plan });
     return true;
   }
+  if (m.type === "stadium-heard") {
+    const err = +m.err;
+    if (Number.isFinite(err) && Math.abs(err) < 2000) { ws.heardErr = err; ws.heardAt = Date.now(); }
+    return true;
+  }
+  if (m.type === "stadium-beacon") {
+    if (!ws.host) return true;
+    const B = m.beacon || {};
+    st.beacon = { on: !!B.on, x: num(B.x, -2000, 2000, 0), y: num(B.y, -2000, 2000, 0), every: 4000, at: Date.now() };
+    if (!st.beacon.on) { st.delay = null; st.heard = 0; }
+    broadcastStadium(room, { type: "stadium-beacon", beacon: st.beacon });
+    return true;
+  }
   if (m.type === "stadium-plan" || m.type === "stadium-assign") {
     if (!ws.host) return true;
     if (m.type === "stadium-plan") {
@@ -464,7 +484,8 @@ function stadiumMessage(room, ws, m) {
       if (CUE_TYPES.indexOf(body.type) < 0) return true;
       if (body.type === "demo" && !(typeof body.scene === "string" && /^[a-z]{2,16}$/.test(body.scene))) return true;
       if (body.type === "image" && !(typeof body.src === "string" && /^data:image\/(jpeg|png|webp);base64,/.test(body.src))) return true;
-      if (body.type === "video" && !(typeof body.url === "string" && body.url.length <= 600 && /^https:\/\//.test(body.url))) return true;
+      /* BLUE PHONE: a video is an https link, or a video saved with Rainbow Run that every phone already holds */
+      if (body.type === "video" && !(typeof body.url === "string" && body.url.length <= 600 && (/^https:\/\//.test(body.url) || /^rainbow-run-videos\/[a-z0-9-]+\.(mp4|webm)$/.test(body.url)))) return true;
       st.cue = Object.assign({}, body, { at: at });
       stadiumSave(room); broadcastStadium(room, { type: "stadium-cue", cue: st.cue });
     } else {
@@ -475,6 +496,22 @@ function stadiumMessage(room, ws, m) {
   return false;
 }
 /* Every two seconds hosts get how many seat phones are in and which seats they hold, while that changes. */
+/* The shared speaker delay is the middle of what the phones heard in the last twenty seconds. */
+function stadiumDelay(room) {
+  const st = room.st;
+  if (!st || !st.beacon || !st.beacon.on) return;
+  const now = Date.now(), errs = [];
+  room.sockets.forEach(ws => { if (ws.heardAt && now - ws.heardAt < 20000) errs.push(ws.heardErr); });
+  if (!errs.length) return;
+  errs.sort((a, b) => a - b);
+  const mid = errs[Math.floor(errs.length / 2)];
+  if (st.delay === null || Math.abs(mid - st.delay) > 2 || st.heard !== errs.length && st.hosts.size) {
+    const moved = st.delay === null || Math.abs(mid - st.delay) > 2;
+    st.delay = Math.round(mid * 10) / 10; st.heard = errs.length;
+    if (moved) broadcastStadium(room, { type: "stadium-delay", delay: st.delay, heard: st.heard });
+    else st.hosts.forEach(h => sendTo(h, { type: "stadium-delay", app: h.app, delay: st.delay, heard: st.heard }));
+  }
+}
 function stadiumCount(room) {
   const st = room.st;
   if (!st || !st.hosts.size) return;
@@ -590,6 +627,8 @@ function welcome(room, ws) {
   if (st && (ws.stadium || st.layout)) {
     sendTo(ws, { type: "stadium-layout", app: ws.app, layout: st.layout, v: st.v });
     if (st.cue) sendTo(ws, { type: "stadium-cue", app: ws.app, cue: st.cue });
+    if (st.beacon) sendTo(ws, { type: "stadium-beacon", app: ws.app, beacon: st.beacon });
+    if (st.delay !== null) sendTo(ws, { type: "stadium-delay", app: ws.app, delay: st.delay, heard: st.heard });
   }
   if (ws.stadium) return;
   const b = room.boards[ws.app];
@@ -694,7 +733,7 @@ wss.on("connection", async (ws, req) => {
 });
 
 /* Every few seconds: run the heartbeat gate, and close phones whose login is missing or ran out. */
-const countTimer = setInterval(() => { rooms.forEach(stadiumCount) }, 2000);
+const countTimer = setInterval(() => { rooms.forEach(r => { stadiumCount(r); stadiumDelay(r); }) }, 2000);
 const gateTimer = setInterval(() => {
   const now = Date.now();
   rooms.forEach(room => {
