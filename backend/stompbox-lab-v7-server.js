@@ -116,7 +116,7 @@ const MAX_STADIUM_JSON = 48000;
 const HOST_CODE = process.env.STADIUM_HOST_CODE || "";
 /* BLUE PHONE: image puts one picture on every screen, video plays one video link on every screen in step. */
 /* BLUE PHONE: demo runs a Rainbow Run animation across the crowd, one phone per pixel. */
-const CUE_TYPES = ["hold", "rainbow", "wave", "ripple", "beat", "picture", "check", "dark", "image", "video", "demo", "youtube", "share"];
+const CUE_TYPES = ["hold", "rainbow", "wave", "ripple", "beat", "picture", "check", "dark", "image", "video", "demo", "youtube", "share", "hype"];
 
 /* ---------- login, optional ---------- */
 const SUPA_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
@@ -477,6 +477,12 @@ function stadiumMessage(room, ws, m) {
   /* BLUE PHONE: screen share stunt. Each seat tells the server where it sits; the host sends a small picture of
      its shared screen several times a second, and the server sends every seat only its own color, so the
      network carries a few bytes per phone instead of the whole picture. */
+  /* BLUE PHONE: hype meter. Each seat phone reports how hard it is being shaken, from nothing to everything. */
+  if (m.type === "stadium-hype") {
+    const e = +m.e;
+    if (Number.isFinite(e)) { ws.hype = Math.min(1, Math.max(0, e)); ws.hypeAt = Date.now(); }
+    return true;
+  }
   if (m.type === "stadium-pos") {
     const x = +m.x, y = +m.y, u = +m.u, v = +m.v;
     if ([x, y, u, v].every(Number.isFinite)) ws.pos = { x: x, y: y, u: Math.min(1, Math.max(0, u)), v: Math.min(1, Math.max(0, v)) };
@@ -638,6 +644,7 @@ function stadiumMessage(room, ws, m) {
       /* BLUE PHONE: a video is an https link, or a video saved with Rainbow Run that every phone already holds */
       if (body.type === "video" && !(typeof body.url === "string" && body.url.length <= 600 && (/^https:\/\//.test(body.url) || /^rainbow-run-videos\/[a-z0-9-]+\.(mp4|webm)$/.test(body.url)))) return true;
       /* BLUE PHONE: a YouTube cue carries only the video id and where to start */
+      if (body.type === "hype") body.secs = Math.round(num(body.secs, 5, 300, 20));
       if (body.type === "share" && body.id !== undefined && !(typeof body.id === "string" && /^[A-Za-z0-9_-]{11}$/.test(body.id))) return true;
       if (body.type === "share") body.start = Math.round(num(body.start, 0, 43200, 0));
       if (body.type === "youtube" && !(typeof body.id === "string" && /^[A-Za-z0-9_-]{11}$/.test(body.id))) return true;
@@ -679,6 +686,34 @@ function stadiumCount(room) {
   if (sig === st.countSig) return;
   st.countSig = sig;
   st.hosts.forEach(ws => sendTo(ws, { type: "stadium-count", app: ws.app, phones: phones, seats: seats }));
+}
+
+/* BLUE PHONE: twice a second during a hype cue the crowd's shaking fills a shared meter. Every phone and big
+   screen gets the meter, and hosts also get each seat's level for the preview. The meter fills at full speed
+   when every seat phone shakes hard, and takes the cue's seconds to fill that way. */
+function stadiumHype(room) {
+  const st = room.st;
+  if (!st || !st.cue || st.cue.type !== "hype") return;
+  const now = Date.now();
+  if (st.hypeKey !== st.cue.at) { st.hypeKey = st.cue.at; st.hypeFill = 0; st.hypeDone = false; }
+  if (now < st.cue.at) return;
+  let n = 0, sum = 0, active = 0, lv = "";
+  const seats = {};
+  room.sockets.forEach(ws => {
+    if (!ws.stadium) return;
+    n++;
+    const e = ws.hypeAt && now - ws.hypeAt < 3000 ? ws.hype : 0;
+    sum += e; if (e > 0.15) active++;
+    if (ws.stadiumSeat) seats[ws.stadiumSeat] = Math.round(e * 9);
+  });
+  const avg = n ? sum / n : 0;
+  if (!st.hypeDone) st.hypeFill = Math.min(1, st.hypeFill + avg * 0.5 / st.cue.secs);
+  const done = st.hypeFill >= 1;
+  const msg = { type: "stadium-hype", fill: Math.round(st.hypeFill * 1000) / 1000, avg: Math.round(avg * 100) / 100, phones: n, active: active, done: done, at: st.cue.at };
+  if (done && !st.hypeDone) { st.hypeDone = true; msg.doneAt = now; st.hypeDoneAt = now; }
+  if (st.hypeDone) msg.doneAt = st.hypeDoneAt;
+  broadcastStadium(room, msg);
+  st.hosts.forEach(h => sendTo(h, { type: "stadium-hype-seats", app: h.app, seats: seats }));
 }
 
 /* ---------- heartbeat gate ---------- */
@@ -899,6 +934,7 @@ wss.on("connection", async (ws, req) => {
 
 /* Every few seconds: run the heartbeat gate, and close phones whose login is missing or ran out. */
 const countTimer = setInterval(() => { rooms.forEach(r => { stadiumCount(r); stadiumDelay(r); }) }, 2000);
+const hypeTimer = setInterval(() => { rooms.forEach(r => stadiumHype(r)) }, 500);
 const gateTimer = setInterval(() => {
   const now = Date.now();
   rooms.forEach(room => {
@@ -925,4 +961,4 @@ const sweep = setInterval(() => {
 
 (async () => { const h = await load("stadium-hosts"); if (Array.isArray(h)) extraHosts = h.filter(e => typeof e === "string"); })();
 server.listen(PORT, () => console.log("stompbox-lab server on port " + PORT + ", redis " + (redis ? "on" : "off") + ", login " + (AUTH_ON ? "on" : "off")));
-process.on("SIGTERM", () => { clearInterval(sweep); clearInterval(gateTimer); clearInterval(countTimer); wss.clients.forEach(ws => ws.close(1001)); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000) });
+process.on("SIGTERM", () => { clearInterval(sweep); clearInterval(gateTimer); clearInterval(countTimer); clearInterval(hypeTimer); wss.clients.forEach(ws => ws.close(1001)); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000) });
