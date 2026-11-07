@@ -30,6 +30,12 @@
      host sends        {type:"stadium-sound", sound}      server sends every phone {type:"stadium-sound", sound}
      server sends hosts {type:"stadium-count", phones, seats:[...]} every two seconds while it changes
    The layout and the cue are kept in Redis, so a phone that joins late gets both at once.
+   BLUE PHONE: v7 seating plan. A section can set its own seat count for any row (rowSeats) and switch single
+   seats off (off, as "row-seat"). Host screens share one seating plan: the guest count, the fill pattern and the
+   seats already handed out at the door, in the order they were handed out.
+     host sends  {type:"stadium-plan", plan}       server stores it and sends every host {type:"stadium-plan", plan}
+     host sends  {type:"stadium-assign", seat}     server adds the seat to the plan unless it is already handed out,
+                                                   then sends every host the plan and this host {type:"stadium-assigned", seat, ok}
 
    One WebSocket per phone. The address carries app, room and device in the query string.
    Every message is one JSON object with a type field.
@@ -334,7 +340,7 @@ function saveBoardSoon(room, app) {
 /* BLUE PHONE: v7 stadium state per room. The seat math lives in rainbow-run-stadium-v1-core.js; the server only
    counts seats to hold a layout under the cap. */
 function stadiumOf(room) {
-  if (!room.st) room.st = { layout: null, v: 0, cue: null, phones: 0, hosts: new Set(), countSig: "", loaded: false };
+  if (!room.st) room.st = { layout: null, v: 0, cue: null, plan: null, phones: 0, hosts: new Set(), countSig: "", loaded: false };
   return room.st;
 }
 async function stadiumLoad(room) {
@@ -342,10 +348,20 @@ async function stadiumLoad(room) {
   if (st.loaded) return st;
   st.loaded = true;
   const saved = await load("stadium:" + room.id);
-  if (saved && typeof saved === "object") { st.layout = saved.layout || null; st.v = saved.v || 0; st.cue = saved.cue || null; }
+  if (saved && typeof saved === "object") { st.layout = saved.layout || null; st.v = saved.v || 0; st.cue = saved.cue || null; st.plan = saved.plan || null; }
   return st;
 }
-function stadiumSave(room) { const st = stadiumOf(room); save("stadium:" + room.id, { layout: st.layout, v: st.v, cue: st.cue }); }
+function stadiumSave(room) { const st = stadiumOf(room); save("stadium:" + room.id, { layout: st.layout, v: st.v, cue: st.cue, plan: st.plan }); }
+const cleanSeatId = x => String(x || "").toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 16);
+/* Cleans a seating plan from a host. */
+function cleanPlan(P) {
+  if (!P || typeof P !== "object") return null;
+  const seen = new Set(), assigned = [];
+  (Array.isArray(P.assigned) ? P.assigned : []).slice(0, MAX_STADIUM_PHONES).forEach(x => { const id = cleanSeatId(x); if (id && !seen.has(id)) { seen.add(id); assigned.push(id); } });
+  return { guests: Math.round(num(P.guests, 0, MAX_STADIUM_PHONES, 0)), pattern: String(P.pattern || "pack").slice(0, 16),
+    shape: String(P.shape || "heart").slice(0, 16), text: String(P.text || "").slice(0, 24), fit: P.fit === "guests" ? "guests" : "venue", assigned: assigned };
+}
+function sendPlan(st) { st.hosts.forEach(h => sendTo(h, { type: "stadium-plan", app: h.app, plan: st.plan })); }
 const num = (v, lo, hi, d) => { v = +v; return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d; };
 /* Cleans a layout from a host and counts its seats. Returns null when it breaks the rules. */
 function cleanLayout(L) {
@@ -359,11 +375,17 @@ function cleanLayout(L) {
     ids.add(id);
     const kind = s.kind === "arc" ? "arc" : "block";
     const rows = Math.round(num(s.rows, 1, 200, 1)), seats = Math.round(num(s.seats, 1, 400, 1)), grow = Math.round(num(s.grow, -20, 40, 0));
-    for (let r = 0; r < rows; r++) total += Math.max(1, seats + grow * r);
+    const rowSeats = Array.isArray(s.rowSeats) ? s.rowSeats.slice(0, rows).map(n => n === null || n === undefined || n === "" ? null : Math.round(num(n, 0, 400, 0))) : [];
+    const off = Array.isArray(s.off) ? s.off.slice(0, 5000).map(x => String(x).replace(/[^0-9-]/g, "").slice(0, 9)).filter(x => /^\d+-\d+$/.test(x)) : [];
+    const offSet = new Set(off);
+    for (let r = 0; r < rows; r++) {
+      const n = typeof rowSeats[r] === "number" ? rowSeats[r] : Math.max(1, seats + grow * r);
+      for (let k = 0; k < n; k++) if (!offSet.has((r + 1) + "-" + (k + 1))) total++;
+    }
     out.push({ id: id, kind: kind, rows: rows, seats: seats, grow: grow,
       x: num(s.x, -2000, 2000, 0), y: num(s.y, -2000, 2000, 0), rot: num(s.rot, -360, 360, 0),
       r: num(s.r, 1, 2000, 30), a0: num(s.a0, -720, 720, 0), span: num(s.span, 1, 360, 40),
-      seatGap: num(s.seatGap, 0.3, 5, 0.6), rowGap: num(s.rowGap, 0.3, 5, 0.9) });
+      seatGap: num(s.seatGap, 0.3, 5, 0.6), rowGap: num(s.rowGap, 0.3, 5, 0.9), rowSeats: rowSeats, off: off });
   }
   if (total > MAX_STADIUM_PHONES) return null;
   return { name: String(L.name || "").slice(0, 40), sections: out, total: total };
@@ -404,6 +426,23 @@ function stadiumMessage(room, ws, m) {
     sendTo(ws, { type: "stadium-host", app: ws.app, ok: true });
     sendTo(ws, { type: "stadium-layout", app: ws.app, layout: st.layout, v: st.v });
     if (st.cue) sendTo(ws, { type: "stadium-cue", app: ws.app, cue: st.cue });
+    sendTo(ws, { type: "stadium-plan", app: ws.app, plan: st.plan });
+    return true;
+  }
+  if (m.type === "stadium-plan" || m.type === "stadium-assign") {
+    if (!ws.host) return true;
+    if (m.type === "stadium-plan") {
+      const P = cleanPlan(m.plan);
+      if (!P) return true;
+      st.plan = P; stadiumSave(room); sendPlan(st);
+      return true;
+    }
+    const id = cleanSeatId(m.seat);
+    if (!st.plan) st.plan = cleanPlan({});
+    const ok = !!id && st.plan.assigned.indexOf(id) < 0 && st.plan.assigned.length < MAX_STADIUM_PHONES;
+    if (ok) { st.plan.assigned.push(id); stadiumSave(room); }
+    sendTo(ws, { type: "stadium-assigned", app: ws.app, seat: id, ok: ok });
+    if (ok) sendPlan(st);
     return true;
   }
   if (m.type === "stadium-layout" || m.type === "stadium-cue" || m.type === "stadium-sound") {
@@ -417,7 +456,8 @@ function stadiumMessage(room, ws, m) {
     }
     const body = m.type === "stadium-cue" ? m.cue : m.sound;
     if (!body || typeof body !== "object" || !sizeOk(body)) return true;
-    const at = num(body.at, Date.now() - 5000, Date.now() + 60000, Date.now() + 600);
+    /* A cue can keep the start time it already had, so refitting the show to new guests does not restart it. */
+    const at = num(body.at, Date.now() - 6 * 3600000, Date.now() + 60000, Date.now() + 600);
     if (m.type === "stadium-cue") {
       if (CUE_TYPES.indexOf(body.type) < 0) return true;
       st.cue = Object.assign({}, body, { at: at });
