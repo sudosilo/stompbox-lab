@@ -26,7 +26,11 @@
      seat phone sends  {type:"stadium-seat", seat:"A-3-12"}
      host sends        {type:"stadium-host", token}       server answers {type:"stadium-host", ok, reason, email, owner}
                        ({type:"stadium-host", code} only while Supabase is not set up)
-     owner sends       {type:"stadium-hosts", action:"add"|"remove", email}   server answers {type:"stadium-hosts", owners, hosts}
+                       ({type:"stadium-host", token, own:{url,key}} signs in through the host's own Supabase;
+                        the first such sign in claims a free room, and the room then only takes that Supabase)
+     owner sends       {type:"stadium-hosts", action:"add"|"remove"|"release", email}
+                       server answers {type:"stadium-hosts", scope, owners, hosts, claim}
+     GET /stadium-login?room=  gives {server:{url,key}|null, code, room:{url,key,owner}|null} for the host screen
      host sends        {type:"stadium-layout", layout}    server sends every phone {type:"stadium-layout", layout, v}
      host sends        {type:"stadium-cue", cue}          server sends every phone {type:"stadium-cue", cue}
      host sends        {type:"stadium-sound", sound}      server sends every phone {type:"stadium-sound", sound}
@@ -127,17 +131,18 @@ let extraHosts = [];
 function isHost(email) { return OWNERS.indexOf(email) >= 0 || extraHosts.indexOf(email) >= 0; }
 const ALLOWED = (process.env.ALLOWED_EMAILS || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean);
 /* BLUE PHONE: Supabase itself checks the token, so no secret is stored on this server for login. */
-async function verify(token) {
+async function verify(token, url, key) {
+  const own = !!url; url = url || SUPA_URL; key = key || SUPA_KEY;
   if (typeof token !== "string" || token.length < 20 || token.length > 4000) return { reason: "sign in again" };
   let user;
   try {
-    const r = await fetch(SUPA_URL + "/auth/v1/user", { headers: { apikey: SUPA_KEY, authorization: "Bearer " + token }, signal: AbortSignal.timeout(6000) });
+    const r = await fetch(url + "/auth/v1/user", { headers: { apikey: key, authorization: "Bearer " + token }, signal: AbortSignal.timeout(6000) });
     if (!r.ok) return { reason: "sign in again" };
     user = await r.json();
   } catch (e) { return { reason: "login check failed, retrying" } }
   if (!user || !user.id) return { reason: "sign in again" };
   const email = String(user.email || "").toLowerCase();
-  if (ALLOWED.length && ALLOWED.indexOf(email) < 0) return { reason: "this account is not on the player list" };
+  if (!own && ALLOWED.length && ALLOWED.indexOf(email) < 0) return { reason: "this account is not on the player list" };
   let exp = Date.now() + 600000;
   try { exp = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString()).exp * 1000 || exp } catch (e) {}
   return { user: { id: String(user.id), email: email, exp: exp, confirmed: !!(user.email_confirmed_at || user.confirmed_at) } };
@@ -371,7 +376,41 @@ async function stadiumLoad(room) {
   st.loaded = true;
   const saved = await load("stadium:" + room.id);
   if (saved && typeof saved === "object") { st.layout = saved.layout || null; st.v = saved.v || 0; st.cue = saved.cue || null; st.plan = saved.plan || null; }
+  const claim = await load("stadium-claim:" + room.id);
+  if (claim && SUPA_HOST_RE.test(claim.url) && SUPA_KEY_RE.test(claim.key)) st.claim = claim;
   return st;
+}
+/* BLUE PHONE: a host who has their own Supabase can claim a room with it. The first sign in through their
+   Supabase claims a free room and makes them its owner; after that only their accounts, and the server owners,
+   can host it. Only real Supabase project addresses are accepted, so the server never calls anywhere else. */
+const SUPA_HOST_RE = /^https:\/\/[a-z0-9]{6,40}\.supabase\.co$/;
+const SUPA_KEY_RE = /^[A-Za-z0-9._-]{20,1200}$/;
+function claimSave(room) {
+  const st = stadiumOf(room);
+  if (!redis) return;
+  if (st.claim) redis.set(PREFIX + "stadium-claim:" + room.id, JSON.stringify(st.claim)).catch(() => {});
+  else redis.del(PREFIX + "stadium-claim:" + room.id).catch(() => {});
+}
+async function claimOf(name) {
+  const r = rooms.get(name);
+  if (r && r.st && r.st.loaded) return r.st.claim || null;
+  const c = await load("stadium-claim:" + name);
+  return c && SUPA_HOST_RE.test(c.url) ? c : null;
+}
+/* who may change which host list: a room owner changes the room's list, a server owner the server's */
+function hostList(ws, st) {
+  if (ws.hostVia === "room" && st.claim) return { scope: "room", owners: [st.claim.owner], hosts: st.claim.hosts, claim: { url: st.claim.url, owner: st.claim.owner } };
+  return { scope: "server", owners: OWNERS, hosts: extraHosts, claim: st.claim ? { url: st.claim.url, owner: st.claim.owner } : null };
+}
+function canManage(ws, st) {
+  if (!ws.host) return false;
+  if (ws.hostVia === "room") return !!st.claim && ws.hostEmail === st.claim.owner;
+  return ws.hostVia === "server" && OWNERS.indexOf(ws.hostEmail) >= 0;
+}
+function unhost(c, reason) {
+  c.host = false; c.hostExp = 0; c.hostVia = "";
+  rooms.forEach(r => { if (r.st) r.st.hosts.delete(c); });
+  sendTo(c, { type: "stadium-host", app: c.app, ok: false, reason: reason, login: true });
 }
 function stadiumSave(room) { const st = stadiumOf(room); save("stadium:" + room.id, { layout: st.layout, v: st.v, cue: st.cue, plan: st.plan }); }
 const cleanSeatId = x => String(x || "").toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 16);
@@ -436,55 +475,88 @@ function stadiumMessage(room, ws, m) {
     return true;
   }
   if (m.type === "stadium-hosts") {
-    /* owners add or remove the other hosts */
-    if (!ws.host || !ws.hostEmail || OWNERS.indexOf(ws.hostEmail) < 0) return true;
+    /* owners add or remove the other hosts, and a room owner, or a server owner, can free a claimed room */
+    if (!canManage(ws, st)) return true;
+    const list = hostList(ws, st), roomScope = list.scope === "room";
     const email = String(m.email || "").trim().toLowerCase().slice(0, 120);
-    if (m.action === "add" && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) && extraHosts.indexOf(email) < 0 && extraHosts.length < 50) extraHosts.push(email);
-    if (m.action === "remove" && OWNERS.indexOf(email) < 0) {
-      extraHosts = extraHosts.filter(e => e !== email);
+    if (m.action === "add" && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) && list.hosts.indexOf(email) < 0 && list.hosts.length < 50 && list.owners.indexOf(email) < 0) list.hosts.push(email);
+    if (m.action === "remove" && list.owners.indexOf(email) < 0) {
+      const i = list.hosts.indexOf(email); if (i >= 0) list.hosts.splice(i, 1);
       /* a removed host loses control right away */
-      wss.clients.forEach(c => { if (c.host && c.hostEmail === email) { c.host = false; c.hostExp = 0; rooms.forEach(r => { if (r.st) r.st.hosts.delete(c); }); sendTo(c, { type: "stadium-host", app: c.app, ok: false, reason: "you were removed from the host list", login: true }); } });
+      (roomScope ? room.sockets : wss.clients).forEach(c => { if (c.host && c.hostEmail === email && c.hostVia === (roomScope ? "room" : "server")) unhost(c, "you were removed from the host list"); });
     }
-    if (redis) redis.set(PREFIX + "stadium-hosts", JSON.stringify(extraHosts)).catch(() => {});
-    sendTo(ws, { type: "stadium-hosts", app: ws.app, owners: OWNERS, hosts: extraHosts });
+    if (m.action === "release" && st.claim) {
+      st.claim = null; claimSave(room);
+      room.sockets.forEach(c => { if (c.host && c.hostVia === "room") unhost(c, "this room no longer uses your Supabase"); });
+    }
+    if (roomScope && st.claim) claimSave(room);
+    else if (!roomScope && redis) redis.set(PREFIX + "stadium-hosts", JSON.stringify(extraHosts)).catch(() => {});
+    if (ws.host) sendTo(ws, Object.assign({ type: "stadium-hosts", app: ws.app }, hostList(ws, st)));
     return true;
   }
   if (m.type === "stadium-host") {
-    if (ws.host && !(SUPA_ON && m.token)) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: true, email: ws.hostEmail || "" }); return true; }
-    if (SUPA_ON) {
-      if (!OWNERS.length) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "no host emails are set on the server" }); return true; }
-      if (typeof m.token !== "string") { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "sign in to host", login: true }); return true; }
-      verify(m.token).then(result => {
-        if (ws.readyState !== 1) return;
-        if (!result.user) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: result.reason, login: true }); return; }
-        /* an unconfirmed account could carry anyone's email, so a host must have confirmed theirs */
-        if (!result.user.confirmed) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "confirm your email from the Supabase message first", login: true }); return; }
-        if (!isHost(result.user.email)) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: result.user.email + " is not on the host list", login: true }); return; }
-        const first = !ws.host;
-        ws.host = true; ws.hostEmail = result.user.email; ws.hostExp = result.user.exp; st.hosts.add(ws); st.countSig = "";
-        sendTo(ws, { type: "stadium-host", app: ws.app, ok: true, email: ws.hostEmail, owner: OWNERS.indexOf(ws.hostEmail) >= 0 });
-        if (OWNERS.indexOf(ws.hostEmail) >= 0) sendTo(ws, { type: "stadium-hosts", app: ws.app, owners: OWNERS, hosts: extraHosts });
-        if (first) {
-          sendTo(ws, { type: "stadium-layout", app: ws.app, layout: st.layout, v: st.v });
-          if (st.cue) sendTo(ws, { type: "stadium-cue", app: ws.app, cue: st.cue });
-          sendTo(ws, { type: "stadium-plan", app: ws.app, plan: st.plan });
-          if (st.beacon) sendTo(ws, { type: "stadium-beacon", app: ws.app, beacon: st.beacon });
+    const deny = (reason, login) => sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: reason, login: login !== false });
+    const grant = (email, exp, via, owner) => {
+      const first = !ws.host;
+      ws.host = true; ws.hostEmail = email; ws.hostExp = exp; ws.hostVia = via; st.hosts.add(ws); st.countSig = "";
+      sendTo(ws, { type: "stadium-host", app: ws.app, ok: true, email: email, owner: owner, via: via });
+      if (owner) sendTo(ws, Object.assign({ type: "stadium-hosts", app: ws.app }, hostList(ws, st)));
+      if (first) {
+        sendTo(ws, { type: "stadium-layout", app: ws.app, layout: st.layout, v: st.v });
+        if (st.cue) sendTo(ws, { type: "stadium-cue", app: ws.app, cue: st.cue });
+        sendTo(ws, { type: "stadium-plan", app: ws.app, plan: st.plan });
+        if (st.beacon) sendTo(ws, { type: "stadium-beacon", app: ws.app, beacon: st.beacon });
+      }
+    };
+    const checked = result => {
+      if (ws.readyState !== 1) return null;
+      if (!result.user) { deny(result.reason); return null; }
+      /* an unconfirmed account could carry anyone's email, so a host must have confirmed theirs */
+      if (!result.user.confirmed) { deny("confirm your email from the Supabase message first"); return null; }
+      return result.user;
+    };
+    /* signing in through the host's own Supabase */
+    if (m.own && typeof m.own === "object") {
+      const url = String(m.own.url || "").trim().replace(/\/+$/, "").toLowerCase(), key = String(m.own.key || "").trim();
+      if (!SUPA_HOST_RE.test(url) || !SUPA_KEY_RE.test(key)) { deny("that Supabase address or key does not look right"); return true; }
+      if (typeof m.token !== "string") { deny("sign in to host"); return true; }
+      if (st.claim && st.claim.url !== url) { deny("this room is claimed with a different Supabase"); return true; }
+      verify(m.token, url, key).then(result => {
+        const u = checked(result); if (!u) return;
+        if (!st.claim) {
+          let busy = false; st.hosts.forEach(h => { if (h !== ws && h.host && h.hostVia !== "room") busy = true; });
+          if (busy) { deny("another host is running this room, pick a different room code"); return; }
+          st.claim = { url: url, key: key, owner: u.email, hosts: [], at: Date.now() }; claimSave(room);
         }
+        if (st.claim.url !== url) { deny("this room is claimed with a different Supabase"); return; }
+        const owner = u.email === st.claim.owner;
+        if (!owner && st.claim.hosts.indexOf(u.email) < 0) { deny(u.email + " is not on this room's host list"); return; }
+        grant(u.email, u.exp, "room", owner);
       });
       return true;
     }
-    if (!HOST_CODE) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "no host code is set on the server" }); return true; }
+    if (ws.host && !m.token) { sendTo(ws, { type: "stadium-host", app: ws.app, ok: true, email: ws.hostEmail || "", via: ws.hostVia }); return true; }
+    if (SUPA_ON && typeof m.token === "string") {
+      if (!OWNERS.length) { deny("no host emails are set on the server", false); return true; }
+      verify(m.token).then(result => {
+        const u = checked(result); if (!u) return;
+        const owner = OWNERS.indexOf(u.email) >= 0;
+        if (st.claim && !owner) { deny("this room signs in with its own Supabase, use the Own Supabase tab"); return; }
+        if (!isHost(u.email)) { deny(u.email + " is not on the host list"); return; }
+        grant(u.email, u.exp, "server", owner);
+      });
+      return true;
+    }
+    if (st.claim) { deny("this room signs in with its own Supabase, use the Own Supabase tab"); return true; }
+    if (SUPA_ON || typeof m.code !== "string") { deny("sign in to host"); return true; }
+    if (!HOST_CODE) { deny("no host code is set on the server, use the Own Supabase tab"); return true; }
     if (!hostOk(m.code)) {
       ws.hostFails = (ws.hostFails || 0) + 1;
-      sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "wrong host code" });
+      deny("wrong host code", false);
       if (ws.hostFails >= 5) ws.close(1008, "too many host code tries");
       return true;
     }
-    ws.host = true; st.hosts.add(ws); st.countSig = "";
-    sendTo(ws, { type: "stadium-host", app: ws.app, ok: true });
-    sendTo(ws, { type: "stadium-layout", app: ws.app, layout: st.layout, v: st.v });
-    if (st.cue) sendTo(ws, { type: "stadium-cue", app: ws.app, cue: st.cue });
-    sendTo(ws, { type: "stadium-plan", app: ws.app, plan: st.plan });
+    grant("", 0, "code", false);
     return true;
   }
   if (m.type === "stadium-heard") {
@@ -699,9 +771,12 @@ const clean = (v, max, pattern) => String(v || "").toLowerCase().replace(pattern
 
 const server = http.createServer((req, res) => {
   /* BLUE PHONE: the public Supabase address and key, so the host screen can sign in. Both are safe to hand out. */
-  if (req.url === "/stadium-login") {
-    res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*", "cache-control": "no-store" });
-    res.end(JSON.stringify(SUPA_ON ? { url: SUPA_URL, key: SUPA_KEY } : {}));
+  if (req.url === "/stadium-login" || req.url.indexOf("/stadium-login?") === 0) {
+    const name = clean(new URL(req.url, "http://x").searchParams.get("room"), 24, /[^a-z0-9]/g);
+    (name ? claimOf(name) : Promise.resolve(null)).then(c => {
+      res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*", "cache-control": "no-store" });
+      res.end(JSON.stringify({ server: SUPA_ON ? { url: SUPA_URL, key: SUPA_KEY } : null, code: !SUPA_ON && !!HOST_CODE, room: c ? { url: c.url, key: c.key, owner: c.owner } : null }));
+    });
     return;
   }
   if (req.url === "/health") {
@@ -798,7 +873,7 @@ const gateTimer = setInterval(() => {
   });
   /* a host whose sign in ran out stops being a host until the screen signs in again */
   wss.clients.forEach(ws => {
-    if (ws.host && ws.hostExp && now > ws.hostExp + 30000) { ws.host = false; ws.hostExp = 0; rooms.forEach(r => { if (r.st) r.st.hosts.delete(ws); }); sendTo(ws, { type: "stadium-host", app: ws.app, ok: false, reason: "sign in again", login: true }); }
+    if (ws.host && ws.hostExp && now > ws.hostExp + 30000) unhost(ws, "sign in again");
   });
   if (!AUTH_ON) return;
   wss.clients.forEach(ws => {
