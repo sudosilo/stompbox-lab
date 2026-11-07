@@ -367,7 +367,8 @@ function saveBoardSoon(room, app) {
 /* BLUE PHONE: v7 stadium state per room. The seat math lives in rainbow-run-stadium-v1-core.js; the server only
    counts seats to hold a layout under the cap. */
 function stadiumOf(room) {
-  if (!room.st) room.st = { layout: null, v: 0, cue: null, plan: null, beacon: null, delay: null, heard: 0, phones: 0, hosts: new Set(), countSig: "", loaded: false };
+  if (!room.st) room.st = { layout: null, v: 0, cue: null, plan: null, beacon: null, delay: null, heard: 0, phones: 0, hosts: new Set(), countSig: "", loaded: false,
+    kiosks: [], tickets: {}, ticketsOnly: false, kioskWs: new Set() };
   return room.st;
 }
 async function stadiumLoad(room) {
@@ -376,6 +377,8 @@ async function stadiumLoad(room) {
   st.loaded = true;
   const saved = await load("stadium:" + room.id);
   if (saved && typeof saved === "object") { st.layout = saved.layout || null; st.v = saved.v || 0; st.cue = saved.cue || null; st.plan = saved.plan || null; }
+  const entry = await load("stadium-entry:" + room.id);
+  if (entry && typeof entry === "object") { st.kiosks = Array.isArray(entry.kiosks) ? entry.kiosks : []; st.tickets = entry.tickets && typeof entry.tickets === "object" ? entry.tickets : {}; st.ticketsOnly = !!entry.ticketsOnly; }
   const claim = await load("stadium-claim:" + room.id);
   if (claim && SUPA_HOST_RE.test(claim.url) && SUPA_KEY_RE.test(claim.key)) st.claim = claim;
   return st;
@@ -412,6 +415,21 @@ function unhost(c, reason) {
   rooms.forEach(r => { if (r.st) r.st.hosts.delete(c); });
   sendTo(c, { type: "stadium-host", app: c.app, ok: false, reason: reason, login: true });
 }
+/* BLUE PHONE: entry. Kiosks at the doors hand out seats, each with a one time ticket in its seat code. The ticket
+   records which kiosk gave the seat and when, and which phone took it, so every seat carries its attribution. */
+function entrySave(room) {
+  const st = stadiumOf(room);
+  if (redis) redis.set(PREFIX + "stadium-entry:" + room.id, JSON.stringify({ kiosks: st.kiosks, tickets: st.tickets, ticketsOnly: st.ticketsOnly }), "EX", TTL_SECONDS * 4).catch(() => {});
+}
+const newToken = n => crypto.randomBytes(n).toString("base64url").replace(/[^A-Za-z0-9]/g, "").slice(0, n);
+function entrySummary(st) {
+  const by = {};
+  st.kiosks.forEach(k => { by[k.id] = { id: k.id, name: k.name, token: k.token, handed: 0, taken: 0 }; });
+  by.host = by.host || { id: "host", name: "Host door", handed: 0, taken: 0 };
+  Object.keys(st.tickets).forEach(t => { const x = st.tickets[t], k = by[x.kiosk] || by.host; k.handed++; if (x.device) k.taken++; });
+  return { kiosks: Object.values(by), ticketsOnly: st.ticketsOnly, total: Object.keys(st.tickets).length };
+}
+function sendEntry(st) { const e = entrySummary(st); st.hosts.forEach(h => sendTo(h, Object.assign({ type: "stadium-entry", app: h.app }, e))); }
 function stadiumSave(room) { const st = stadiumOf(room); save("stadium:" + room.id, { layout: st.layout, v: st.v, cue: st.cue, plan: st.plan }); }
 const cleanSeatId = x => String(x || "").toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 16);
 /* Cleans a seating plan from a host. */
@@ -422,7 +440,7 @@ function cleanPlan(P) {
   return { guests: Math.round(num(P.guests, 0, MAX_STADIUM_PHONES, 0)), pattern: String(P.pattern || "pack").slice(0, 16),
     shape: String(P.shape || "heart").slice(0, 16), text: String(P.text || "").slice(0, 24), fit: P.fit === "guests" ? "guests" : "venue", assigned: assigned };
 }
-function sendPlan(st) { st.hosts.forEach(h => sendTo(h, { type: "stadium-plan", app: h.app, plan: st.plan })); }
+function sendPlan(st) { st.hosts.forEach(h => sendTo(h, { type: "stadium-plan", app: h.app, plan: st.plan })); st.kioskWs.forEach(h => sendTo(h, { type: "stadium-plan", app: h.app, plan: st.plan })); }
 const num = (v, lo, hi, d) => { v = +v; return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d; };
 /* Cleans a layout from a host and counts its seats. Returns null when it breaks the rules. */
 function cleanLayout(L) {
@@ -470,8 +488,56 @@ function stadiumMessage(room, ws, m) {
   const st = stadiumOf(room);
   if (m.type === "stadium-seat") {
     const seat = String(m.seat || "").toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 16);
+    const ticket = typeof m.ticket === "string" ? m.ticket.replace(/[^A-Za-z0-9]/g, "").slice(0, 32) : "";
+    const no = reason => { ws.stadiumSeat = ""; sendTo(ws, { type: "stadium-seated", app: ws.app, seat: "", reason: reason }); };
+    if (ticket) {
+      const t = st.tickets[ticket];
+      if (!t || t.seat !== seat) { no("that seat code is not valid for this show"); return true; }
+      if (t.device && t.device !== ws.device) { no("that seat code was already used by another phone"); return true; }
+      if (!t.device) {
+        t.device = ws.device; t.takenAt = Date.now(); entrySave(room); sendEntry(st);
+        st.kioskWs.forEach(k => { if (k.kiosk === t.kiosk) sendTo(k, { type: "stadium-ticket-taken", app: k.app, ticket: ticket, seat: seat }); });
+      }
+    } else if (st.ticketsOnly && seat) {
+      /* with tickets only, a printed code still works for the phone that already holds that seat */
+      const held = Object.keys(st.tickets).some(k => st.tickets[k].seat === seat && st.tickets[k].device === ws.device);
+      if (!held) { no("this show seats people at the entry kiosks, scan the code a kiosk gives you"); return true; }
+    }
     ws.stadiumSeat = seat || "";
     sendTo(ws, { type: "stadium-seated", app: ws.app, seat: ws.stadiumSeat });
+    return true;
+  }
+  /* a kiosk proves itself with the token in its link */
+  if (m.type === "stadium-kiosk") {
+    const k = st.kiosks.find(x => x.id === m.id && typeof m.token === "string" && x.token === m.token);
+    if (!k) { sendTo(ws, { type: "stadium-kiosk", app: ws.app, ok: false, reason: "this kiosk link is not valid any more, ask the host for a new one" }); return true; }
+    ws.kiosk = k.id; st.kioskWs.add(ws);
+    const pending = Object.keys(st.tickets).find(t => st.tickets[t].kiosk === k.id && !st.tickets[t].device && st.tickets[t].pending);
+    sendTo(ws, { type: "stadium-kiosk", app: ws.app, ok: true, name: k.name, pending: pending ? { ticket: pending, seat: st.tickets[pending].seat } : null });
+    sendTo(ws, { type: "stadium-layout", app: ws.app, layout: st.layout, v: st.v });
+    sendTo(ws, { type: "stadium-plan", app: ws.app, plan: st.plan });
+    return true;
+  }
+  /* the host adds and removes kiosks, and can make kiosk tickets the only way in */
+  if (m.type === "stadium-kiosks") {
+    if (!ws.host) return true;
+    if (m.action === "add" && st.kiosks.length < 40) {
+      const name = String(m.name || "").replace(/[^\w .'-]/g, "").trim().slice(0, 32) || "Kiosk " + (st.kiosks.length + 1);
+      st.kiosks.push({ id: "k" + newToken(8), name: name, token: newToken(24), at: Date.now() });
+    }
+    if (m.action === "remove") {
+      st.kiosks = st.kiosks.filter(k => k.id !== m.id);
+      st.kioskWs.forEach(k => { if (k.kiosk === m.id) { sendTo(k, { type: "stadium-kiosk", app: k.app, ok: false, reason: "the host removed this kiosk" }); k.kiosk = ""; st.kioskWs.delete(k); } });
+    }
+    if (m.action === "only") st.ticketsOnly = !!m.on;
+    entrySave(room); sendEntry(st);
+    return true;
+  }
+  if (m.type === "stadium-entry") {
+    if (!ws.host) return true;
+    /* the full list of seats handed out, for the host to keep */
+    const rows = Object.keys(st.tickets).map(t => { const x = st.tickets[t], k = st.kiosks.find(y => y.id === x.kiosk); return { seat: x.seat, kiosk: k ? k.name : x.kiosk === "host" ? "Host door" : "removed kiosk", at: x.at, device: x.device ? String(x.device).slice(0, 8) : "", takenAt: x.takenAt || 0 }; });
+    sendTo(ws, { type: "stadium-entry-list", app: ws.app, rows: rows });
     return true;
   }
   /* BLUE PHONE: screen share stunt. Each seat tells the server where it sits; the host sends a small picture of
@@ -543,6 +609,7 @@ function stadiumMessage(room, ws, m) {
         sendTo(ws, { type: "stadium-plan", app: ws.app, plan: st.plan });
         if (st.beacon) sendTo(ws, { type: "stadium-beacon", app: ws.app, beacon: st.beacon });
       }
+      sendTo(ws, Object.assign({ type: "stadium-entry", app: ws.app }, entrySummary(st)));
     };
     const checked = result => {
       if (ws.readyState !== 1) return null;
@@ -609,18 +676,31 @@ function stadiumMessage(room, ws, m) {
     return true;
   }
   if (m.type === "stadium-plan" || m.type === "stadium-assign") {
-    if (!ws.host) return true;
+    if (!ws.host && !(m.type === "stadium-assign" && ws.kiosk)) return true;
     if (m.type === "stadium-plan") {
       const P = cleanPlan(m.plan);
       if (!P) return true;
       st.plan = P; stadiumSave(room); sendPlan(st);
+      /* seats the host freed lose their tickets */
+      const keep = new Set(P.assigned); let dropped = false;
+      Object.keys(st.tickets).forEach(t => { if (!keep.has(st.tickets[t].seat)) { delete st.tickets[t]; dropped = true; } });
+      if (dropped) { entrySave(room); sendEntry(st); }
       return true;
     }
     const id = cleanSeatId(m.seat);
     if (!st.plan) st.plan = cleanPlan({});
+    /* every door shares one fill order, and the server makes sure no two doors give out the same seat */
     const ok = !!id && st.plan.assigned.indexOf(id) < 0 && st.plan.assigned.length < MAX_STADIUM_PHONES;
-    if (ok) { st.plan.assigned.push(id); stadiumSave(room); }
-    sendTo(ws, { type: "stadium-assigned", app: ws.app, seat: id, ok: ok });
+    let ticket = "";
+    if (ok) {
+      st.plan.assigned.push(id); stadiumSave(room);
+      ticket = newToken(12);
+      const by = ws.kiosk || "host";
+      Object.keys(st.tickets).forEach(t => { if (st.tickets[t].kiosk === by && st.tickets[t].pending) delete st.tickets[t].pending; });
+      st.tickets[ticket] = { seat: id, kiosk: by, at: Date.now(), pending: true };
+      entrySave(room); sendEntry(st);
+    }
+    sendTo(ws, { type: "stadium-assigned", app: ws.app, seat: id, ok: ok, ticket: ticket });
     if (ok) sendPlan(st);
     return true;
   }
@@ -900,7 +980,7 @@ wss.on("connection", async (ws, req) => {
   ws.on("close", () => {
     if (!room) return;
     room.sockets.delete(ws);
-    if (room.st) { if (ws.stadium) room.st.phones--; room.st.hosts.delete(ws); }
+    if (room.st) { if (ws.stadium) room.st.phones--; room.st.hosts.delete(ws); room.st.kioskWs.delete(ws); }
     if (!ws.stadium) { seatUp(room, ws.app); rosterUp(room); }
     if (!room.sockets.size) {
       Object.keys(room.boardTimers).forEach(a => {
