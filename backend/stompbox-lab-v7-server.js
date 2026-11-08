@@ -96,6 +96,7 @@
 
 const http = require("http");
 const crypto = require("crypto");
+const VX = require("./stompbox-lab-v7-virus.js");
 const { WebSocketServer } = require("ws");
 
 const PORT = process.env.PORT || 8080;
@@ -116,7 +117,7 @@ const MAX_STADIUM_JSON = 48000;
 const HOST_CODE = process.env.STADIUM_HOST_CODE || "";
 /* BLUE PHONE: image puts one picture on every screen, video plays one video link on every screen in step. */
 /* BLUE PHONE: demo runs a Rainbow Run animation across the crowd, one phone per pixel. */
-const CUE_TYPES = ["hold", "rainbow", "wave", "ripple", "beat", "picture", "check", "dark", "image", "video", "demo", "youtube", "share", "hype"];
+const CUE_TYPES = ["hold", "rainbow", "wave", "ripple", "beat", "picture", "check", "dark", "image", "video", "demo", "youtube", "share", "hype", "virus"];
 
 /* ---------- login, optional ---------- */
 const SUPA_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
@@ -368,7 +369,7 @@ function saveBoardSoon(room, app) {
    counts seats to hold a layout under the cap. */
 function stadiumOf(room) {
   if (!room.st) room.st = { layout: null, v: 0, cue: null, plan: null, beacon: null, delay: null, heard: 0, phones: 0, hosts: new Set(), countSig: "", loaded: false,
-    kiosks: [], tickets: {}, ticketsOnly: false, kioskWs: new Set() };
+    kiosks: [], tickets: {}, ticketsOnly: false, kioskWs: new Set(), vxSeeds: [], vx: null, vxKey: 0 };
   return room.st;
 }
 async function stadiumLoad(room) {
@@ -378,7 +379,7 @@ async function stadiumLoad(room) {
   const saved = await load("stadium:" + room.id);
   if (saved && typeof saved === "object") { st.layout = saved.layout || null; st.v = saved.v || 0; st.cue = saved.cue || null; st.plan = saved.plan || null; }
   const entry = await load("stadium-entry:" + room.id);
-  if (entry && typeof entry === "object") { st.kiosks = Array.isArray(entry.kiosks) ? entry.kiosks : []; st.tickets = entry.tickets && typeof entry.tickets === "object" ? entry.tickets : {}; st.ticketsOnly = !!entry.ticketsOnly; }
+  if (entry && typeof entry === "object") { st.kiosks = Array.isArray(entry.kiosks) ? entry.kiosks : []; st.tickets = entry.tickets && typeof entry.tickets === "object" ? entry.tickets : {}; st.ticketsOnly = !!entry.ticketsOnly; st.vxSeeds = Array.isArray(entry.vxSeeds) ? entry.vxSeeds : []; }
   const claim = await load("stadium-claim:" + room.id);
   if (claim && SUPA_HOST_RE.test(claim.url) && SUPA_KEY_RE.test(claim.key)) st.claim = claim;
   return st;
@@ -419,7 +420,7 @@ function unhost(c, reason) {
    records which kiosk gave the seat and when, and which phone took it, so every seat carries its attribution. */
 function entrySave(room) {
   const st = stadiumOf(room);
-  if (redis) redis.set(PREFIX + "stadium-entry:" + room.id, JSON.stringify({ kiosks: st.kiosks, tickets: st.tickets, ticketsOnly: st.ticketsOnly }), "EX", TTL_SECONDS * 4).catch(() => {});
+  if (redis) redis.set(PREFIX + "stadium-entry:" + room.id, JSON.stringify({ kiosks: st.kiosks, tickets: st.tickets, ticketsOnly: st.ticketsOnly, vxSeeds: st.vxSeeds }), "EX", TTL_SECONDS * 4).catch(() => {});
 }
 const newToken = n => crypto.randomBytes(n).toString("base64url").replace(/[^A-Za-z0-9]/g, "").slice(0, n);
 function entrySummary(st) {
@@ -549,6 +550,33 @@ function stadiumMessage(room, ws, m) {
     if (Number.isFinite(e)) { ws.hype = Math.min(1, Math.max(0, e)); ws.hypeAt = Date.now(); }
     return true;
   }
+  /* BLUE PHONE: virus mode. See stompbox-lab-v7-virus.js for the sound game and the map math. */
+  if (m.type === "stadium-vx-seeds") {
+    if (!ws.host) return true;
+    if (m.action === "add" && st.vxSeeds.length < 16) {
+      const x = num(m.x, -2000, 2000, 0), y = num(m.y, -2000, 2000, 0);
+      st.vxSeeds.push({ id: "v" + newToken(6), name: String(m.name || "Seed " + (st.vxSeeds.length + 1)).replace(/[^\w .'-]/g, "").slice(0, 24), x: x, y: y, token: newToken(16) });
+    }
+    if (m.action === "remove") st.vxSeeds = st.vxSeeds.filter(v => v.id !== m.id);
+    entrySave(room); vxSeedsOut(st);
+    return true;
+  }
+  if (m.type === "stadium-vx-hello") {
+    if (!st.cue || st.cue.type !== "virus") return true;
+    vxState(st);
+    const seed = st.vxSeeds.find(v => v.id === m.seed && typeof m.token === "string" && v.token === m.token);
+    const p = VX.join(st.vx, ws.device, seed || null);
+    p.strain = seed ? st.vxSeeds.indexOf(seed) : p.strain;
+    /* a seat phone already knows its spot, so it anchors the map */
+    if (!seed && ws.pos && !p.fixed) { p.fixed = { x: ws.pos.x, y: ws.pos.y }; p.pos = { x: ws.pos.x, y: ws.pos.y }; }
+    p.ws = ws; p.sent = "";
+    vxTell(st, p, true);
+    return true;
+  }
+  if (m.type === "stadium-vx") {
+    if (st.vx) VX.report(st.vx, ws.device, m);
+    return true;
+  }
   if (m.type === "stadium-pos") {
     const x = +m.x, y = +m.y, u = +m.u, v = +m.v;
     if ([x, y, u, v].every(Number.isFinite)) ws.pos = { x: x, y: y, u: Math.min(1, Math.max(0, u)), v: Math.min(1, Math.max(0, v)) };
@@ -610,6 +638,7 @@ function stadiumMessage(room, ws, m) {
         if (st.beacon) sendTo(ws, { type: "stadium-beacon", app: ws.app, beacon: st.beacon });
       }
       sendTo(ws, Object.assign({ type: "stadium-entry", app: ws.app }, entrySummary(st)));
+      sendTo(ws, { type: "stadium-vx-seeds", app: ws.app, seeds: st.vxSeeds });
     };
     const checked = result => {
       if (ws.readyState !== 1) return null;
@@ -794,6 +823,32 @@ function stadiumHype(room) {
   if (st.hypeDone) msg.doneAt = st.hypeDoneAt;
   broadcastStadium(room, msg);
   st.hosts.forEach(h => sendTo(h, { type: "stadium-hype-seats", app: h.app, seats: seats }));
+}
+
+/* ---------- virus mode ---------- */
+function vxState(st) { if (!st.vx || st.vxKey !== st.cue.at) { st.vx = VX.fresh(); st.vxKey = st.cue.at; } return st.vx; }
+function vxSeedsOut(st) { st.hosts.forEach(h => sendTo(h, { type: "stadium-vx-seeds", app: h.app, seeds: st.vxSeeds })); }
+/* tells one phone its slot, its strain and hops, and where the map puts it, when any of that changed */
+function vxTell(st, p, force) {
+  if (!p.ws || p.ws.readyState !== 1) return;
+  const s = VX.strainOf(p), idx = s ? st.vxSeeds.findIndex(v => v.id === s.seed) : -1;
+  const msg = { type: "stadium-vx-you", app: p.ws.app, slot: p.slot, id: p.id, group: p.group, G: st.vx.G, strain: idx, hops: s ? s.hops : -1,
+    x: p.pos ? Math.round(p.pos.x * 10) / 10 : null, y: p.pos ? Math.round(p.pos.y * 10) / 10 : null, seed: !!p.seed };
+  const sig = [msg.G, msg.strain, msg.hops, msg.x, msg.y].join("|");
+  if (!force && sig === p.sent) return;
+  p.sent = sig; sendTo(p.ws, msg);
+}
+function stadiumVirus(room) {
+  const st = room.st;
+  if (!st || !st.cue || st.cue.type !== "virus") return;
+  const vx = vxState(st), now = Date.now();
+  if (!VX.step(vx, st.cue.at, now)) return;
+  vx.phones.forEach(p => vxTell(st, p, false));
+  /* hosts get the whole map: spot, strain and hops for every phone, and the seeds */
+  const list = [];
+  vx.phones.forEach(p => { const s = VX.strainOf(p); list.push([p.pos ? Math.round(p.pos.x * 10) / 10 : null, p.pos ? Math.round(p.pos.y * 10) / 10 : null, s ? st.vxSeeds.findIndex(v => v.id === s.seed) : -1, s ? s.hops : -1, p.fixed && !p.seed ? 1 : 0]); });
+  let pairs = 0; vx.edges.forEach(e => { if (e.d.length) pairs++; });
+  st.hosts.forEach(h => sendTo(h, { type: "stadium-vx-map", app: h.app, phones: list, pairs: pairs, hopLen: Math.round(vx.hopLen * 100) / 100, G: vx.G, cycle: vx.done }));
 }
 
 /* ---------- heartbeat gate ---------- */
@@ -1014,7 +1069,7 @@ wss.on("connection", async (ws, req) => {
 
 /* Every few seconds: run the heartbeat gate, and close phones whose login is missing or ran out. */
 const countTimer = setInterval(() => { rooms.forEach(r => { stadiumCount(r); stadiumDelay(r); }) }, 2000);
-const hypeTimer = setInterval(() => { rooms.forEach(r => stadiumHype(r)) }, 500);
+const hypeTimer = setInterval(() => { rooms.forEach(r => { stadiumHype(r); stadiumVirus(r); }) }, 500);
 const gateTimer = setInterval(() => {
   const now = Date.now();
   rooms.forEach(room => {
