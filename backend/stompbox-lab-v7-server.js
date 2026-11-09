@@ -927,6 +927,7 @@ function onMessage(room, ws, text) {
   /* Stadium seats only listen. They send seats, clock pings and nothing that changes the band. */
   if (ws.stadium) return;
 
+  if (m.type === "show-note" || m.type === "show-fx") { show(room, ws, m); return }
   if (m.type === "beat") { beat(room, ws); return }
   if (m.type === "transport") {
     if (transport(room, m)) { save("loop:" + room.id, room.loop); broadcastLoop(room) }
@@ -946,6 +947,38 @@ function onMessage(room, ws, text) {
   if (m.type === "request") { relay(room, m, ws); return }
 }
 
+/* BLUE PHONE: show events. A note struck on Stompbox, and the pedals it was played through, go out to every app
+   in the room, so a visualizer like Rainbow Run's train window can turn each note into scenery the moment it
+   sounds. Each phone gets the message stamped with its own app name, the way the loop is sent. */
+const FX_IDS = ["wah", "dist", "chorus", "trem", "delay", "reverb"];
+function cleanFx(fx) {
+  const out = {};
+  if (!fx || typeof fx !== "object") return out;
+  FX_IDS.forEach(k => { if (fx[k]) out[k] = true; });
+  ["delayTime", "reverbSize", "drive"].forEach(k => { const v = +fx[k]; if (Number.isFinite(v)) out[k] = Math.min(1, Math.max(0, Math.round(v * 100) / 100)); });
+  return out;
+}
+function show(room, ws, m) {
+  const now = Date.now();
+  if (!room.show) room.show = { fx: {}, from: "" };
+  const msg = { type: m.type, from: ws.app, device: ws.device };
+  msg.fx = cleanFx(m.fx); room.show.fx = msg.fx; room.show.from = ws.app;
+  if (m.type === "show-note") {
+    const n = Math.round(+m.n), v = Math.round(+m.v), at = +m.at;
+    if (!(n >= 0 && n <= 127)) return;
+    msg.n = n; msg.v = v >= 1 && v <= 127 ? v : 100;
+    msg.at = Number.isFinite(at) && Math.abs(at - now) < 5000 ? at : now;
+    msg.patch = typeof m.patch === "string" ? m.patch.replace(/[^a-z]/g, "").slice(0, 12) : "";
+  }
+  const byApp = new Map();
+  room.sockets.forEach(c => {
+    if (c === ws || c.readyState !== 1 || c.stadium) return;
+    let text = byApp.get(c.app);
+    if (!text) { text = JSON.stringify(Object.assign({ app: c.app }, msg)); byApp.set(c.app, text); }
+    c.send(text);
+  });
+}
+
 /* A phone that joins gets the loop first, then the board the room already holds. */
 function welcome(room, ws) {
   sendTo(ws, loopMessage(room, ws.app));
@@ -957,6 +990,7 @@ function welcome(room, ws) {
     if (st.delay !== null) sendTo(ws, { type: "stadium-delay", app: ws.app, delay: st.delay, heard: st.heard });
   }
   if (ws.stadium) return;
+  if (room.show) sendTo(ws, { type: "show-fx", app: ws.app, from: room.show.from, fx: room.show.fx });
   const b = room.boards[ws.app];
   if (b.snap) {
     sendTo(ws, b.snap);

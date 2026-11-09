@@ -301,6 +301,16 @@ function noteOn(m){
   amp.gain.setTargetAtTime(.2*P.sus,t+P.a,P.dec/(P.sus?3:4));
   const oscs=P.osc.map(([type,det,lvl])=>{const o=ctx.createOscillator(),g=ctx.createGain();o.type=type;o.frequency.value=hz(m);o.detune.value=det;g.gain.value=lvl/P.osc.length*1.3;o.connect(g);g.connect(f);o.start(t);return o});
   f.connect(amp);amp.connect(chainIn);voices.set(m,{amp,oscs,rel:P.rel});setKey(m,true);
+  showNote(m);
+}
+/* BLUE PHONE: every struck note, with the pedals it went through, goes to the room for the visualizers.
+   The sound stays on this phone; only the note, the time it was struck and the pedal switches travel. */
+function showFx(){
+  return {wah:S.wah.on,dist:S.dist.on,chorus:S.chorus.on,trem:S.trem.on,delay:S.delay.on,reverb:S.reverb.on,
+    delayTime:S.delay.time,reverbSize:S.reverb.size,drive:S.dist.drive};
+}
+function showNote(m){
+  try{if(sync.status==="live")sync.send("show-note",{n:m,v:100,at:clock.synced?clock.now():Date.now(),patch:patch,fx:showFx()})}catch(e){}
 }
 function noteOff(m){
   const v=voices.get(m);if(!v)return;voices.delete(m);setKey(m,false);
@@ -323,6 +333,7 @@ function writePath(path,value){
 }
 function change(path,value,remote){
   if(!writePath(path,value))return;
+  if(/\.on$/.test(String(path))){try{if(sync.status==="live")sync.send("show-fx",{fx:showFx()})}catch(e){}}
   /* BLUE PHONE: v4 knobs, switches and sounds stay on this phone. Nothing about the board is sent to other phones. */
 }
 /* The whole board as one JSON snapshot. Volume and octave belong to the phone and are left out. */
