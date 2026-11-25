@@ -8,6 +8,4 @@ Live at stompbox-lab.vercel.app
 
 This app is checked every morning by Control Troll.
 
-Latest change. 2026-11-09, v2026.11.09. Added a train window scene where Stompbox notes and pedals become passing scenery.
-
 Full history is in CHANGELOG.md.
